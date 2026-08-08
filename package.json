@@ -1,0 +1,39 @@
+{
+  "name": "youcall-desktop",
+  "productName": "유콜 데스크",
+  "version": "1.0.0",
+  "description": "유콜 전자칠판용 설치형 클라이언트 — 브라우저 없이 백그라운드에서 호출을 감지해 알려준다",
+  "main": "main.js",
+  "author": "kimju1416",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --publish never"
+  },
+  "build": {
+    "appId": "com.kimju.youcalldesktop",
+    "productName": "유콜 데스크",
+    "artifactName": "유콜데스크-Setup-${version}.exe",
+    "files": [
+      "main.js",
+      "preload.js",
+      "main/**",
+      "renderer/**",
+      "assets/**",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}

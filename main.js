@@ -231,6 +231,7 @@ async function runSmoke() {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null); // File/Edit/View/Window/Help 기본 메뉴 제거 — 전자칠판 화면에 불필요
   if (SMOKE) { runSmoke(); return; }
   registerIpc();
   createWindow();

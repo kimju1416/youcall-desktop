@@ -1,7 +1,7 @@
 {
   "name": "youcall-desktop",
   "productName": "유콜 데스크",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "유콜 전자칠판용 설치형 클라이언트 — 브라우저 없이 백그라운드에서 호출을 감지해 알려준다",
   "main": "main.js",
   "author": "kimju1416",

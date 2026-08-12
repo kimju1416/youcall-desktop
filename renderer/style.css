@@ -127,13 +127,18 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 .notebox .nm.empty { color: var(--text2); font-size: 13px; }
 
 .weekbox { grid-area: week; }
-table.week { width: 100%; border-collapse: collapse; font-size: 13px; flex: 1; }
-table.week th { font-weight: 700; color: var(--text2); padding: 7px 4px; font-size: 12px; }
+/* #weekWrap이 flex 컨테이너가 아니면 안쪽 table의 flex:1이 무시돼 표가 내용물 높이만큼만 차지하고
+   박스 아래에 빈 공간이 남는다 — 래퍼를 flex-column으로 만들어야 표가 실제로 늘어난다. */
+/* 우측 하단에 항상 떠 있는 소리 설정 패널(.s-settings, 실측 높이 약 235px)과 겹치지 않도록
+   표 아래에 그만큼 여백을 예약해둔다 — 값을 바꾸면 .s-settings 크기도 함께 확인할 것. */
+#weekWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 250px; }
+table.week { width: 100%; border-collapse: collapse; font-size: clamp(12px,0.8vw,20px); flex: 1; }
+table.week th { font-weight: 700; color: var(--text2); padding: 7px 4px; font-size: clamp(11px,0.72vw,18px); }
 table.week th.today { color: var(--blue-d); }
 table.week td { text-align: center; padding: 6px 4px; border-top: 1px solid var(--border); font-weight: 500; }
 table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
-table.week td.pnum { color: var(--text2); font-size: 11px; width: 32px; }
-.week-empty { font-size: 12px; color: var(--text2); }
+table.week td.pnum { color: var(--text2); font-size: clamp(10px,0.67vw,16px); width: 32px; }
+.week-empty { font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
 
 .s-settings { position: absolute; bottom: 16px; right: 16px; opacity: .65; transition: opacity .3s; }
 .s-settings:hover { opacity: 1; }

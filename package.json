@@ -13,7 +13,7 @@
   "build": {
     "appId": "com.kimju.youcalldesktop",
     "productName": "유콜 데스크",
-    "artifactName": "YouCallDesk-Setup-${version}.exe",
+    "artifactName": "YouCallDesk-Setup.exe",
     "files": [
       "main.js",
       "preload.js",

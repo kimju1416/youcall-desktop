@@ -9,7 +9,7 @@
 
 ## 다운로드
 
-[Releases](https://github.com/kimju1416/youcall-desktop/releases/latest)에서 `YouCallDesk-Setup-1.0.0.exe`를 내려받아 실행하세요. 별도 확인창 없이 바로 설치됩니다.
+[Releases](https://github.com/kimju1416/youcall-desktop/releases/latest)에서 `YouCallDesk-Setup.exe`를 내려받아 실행하세요. 별도 확인창 없이 바로 설치됩니다.
 
 > ⚠️ 설치할 때 윈도우 보안 경고(SmartScreen)가 뜨면 **「추가 정보」 ▸ 「실행」**을 누르세요.
 

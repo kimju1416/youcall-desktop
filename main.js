@@ -191,7 +191,14 @@ function registerIpc() {
   });
   ipcMain.handle('yc:get-tts', (e, text) => api.getTts(cfg().webAppUrl, text));
   ipcMain.handle('yc:test-connection', async (e, { webAppUrl, grade, classNum }) => {
-    return api.getBoard(webAppUrl, grade, classNum);
+    // GAS가 한동안 안 쓰이다 깨어나는 순간엔 응답이 8초를 넘겨 정상 URL도 "연결 실패"로 뜨던 문제 —
+    // 확인 단계만 30초 제한 + 최대 3회 재시도. 첫 시도가 서버를 깨워놔서 재시도는 대부분 바로 붙는다.
+    let test = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      test = await api.getBoard(webAppUrl, grade, classNum, 30000);
+      if (test.ok) break;
+    }
+    return test;
   });
   ipcMain.handle('yc:quit', () => { quitting = true; app.quit(); });
 }

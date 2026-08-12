@@ -31,7 +31,7 @@ const getCalls = (webAppUrl, grade, classNum) => callApi(webAppUrl, 'calls', { g
 const confirmCall = (webAppUrl, row) => callApi(webAppUrl, 'confirm', { row });
 const getMeal = (webAppUrl) => callApi(webAppUrl, 'meal', {});
 const getTimetable = (webAppUrl, grade, classNum, scope) => callApi(webAppUrl, 'timetable', { grade, classNum, scope });
-const getBoard = (webAppUrl, grade, classNum) => callApi(webAppUrl, 'board', { grade, classNum });
+const getBoard = (webAppUrl, grade, classNum, timeoutMs) => callApi(webAppUrl, 'board', { grade, classNum }, timeoutMs);
 const getTts = (webAppUrl, text) => callApi(webAppUrl, 'tts', { text });
 
 module.exports = { getCalls, confirmCall, getMeal, getTimetable, getBoard, getTts };

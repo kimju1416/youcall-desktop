@@ -341,6 +341,9 @@ window.addEventListener('DOMContentLoaded', async function () {
     }, { once: true, capture: true });
   });
 
+  // 공지 경로는 {board}만, 급식/시간표 경로는 {meal,todayTimetable,weekTimetable}만 나눠 보낸다.
+  // 받은 필드만 다시 그리고, 안 온(undefined) 필드는 기존 화면을 그대로 둔다.
+  // (빈 배열/빈 객체로 온 경우의 "없음" 표시는 각 render 함수가 유지 — undefined와는 구분된다.)
   window.yc.onBoard(function (data) {
     if (data.board) {
       document.documentElement.setAttribute('data-theme', String(data.board.theme || 1));
@@ -350,9 +353,9 @@ window.addEventListener('DOMContentLoaded', async function () {
       renderAgenda(data.board.agenda);
       if (data.board.periodConfig) { PERIOD_CONFIG = data.board.periodConfig; SCHEDULE = buildSchedule(PERIOD_CONFIG); }
     }
-    renderMeal(data.meal);
-    renderPeriodRow(data.todayTimetable);
-    renderWeek(data.weekTimetable);
+    if (data.meal !== undefined) renderMeal(data.meal);
+    if (data.todayTimetable !== undefined) renderPeriodRow(data.todayTimetable);
+    if (data.weekTimetable !== undefined) renderWeek(data.weekTimetable);
   });
 
   window.yc.onAlert(showAlert);

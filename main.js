@@ -10,14 +10,23 @@ const api = require('./main/api');
 
 const SMOKE = process.argv.includes('--smoke'); // TeacherDesk2와 동일한 검증 기법: 오프스크린 캡처 후 자동 종료
 
-const POLL_MS = 2000;          // 호출 감지 주기 — 웹 학생화면과 동일(index.html의 setInterval(checkStudent,2000))
-const BOARD_REFRESH_MS = 3 * 60 * 1000; // 대기화면 데이터(급식/시간표/공지 등) 재조회 주기 — 서버가 6시간 캐시라 부담 없음
+const POLL_MS = 3000;          // 호출 감지 주기 — 여러 반 상시 폴링의 서버 동시접속 부하를 줄이려 3초로
+const BOARD_REFRESH_MS = 3 * 60 * 1000;   // 공지/설정(getBoard) 재조회 주기 — NEIS 미사용·부하 미미, 긴급공지·학급메모 빠른 반영 위해 짧게 유지
+const MEAL_REFRESH_MS = 30 * 60 * 1000;   // 급식/시간표(NEIS) 재조회 주기 — 자주 바뀌지 않으므로 드물게
+const MEAL_RETRY_MS = 90 * 1000;          // 급식/시간표 중 하나라도 실패하면 30분 안 기다리고 빠르게 1회 재시도
 
 let win = null;
 let tray = null;
 let quitting = false;
 let pollTimer = null;
 let boardTimer = null;
+let mealTimer = null;
+let mealRetryTimer = null;
+
+// ── 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다 ──
+let lastMeal = [];
+let lastToday = [];
+let lastWeek = {};
 
 // ── 호출 상태 머신 ──
 let alertedRows = new Set();  // 이번 실행 동안 이미 알림을 시작한 row (재알림 방지)
@@ -105,26 +114,46 @@ function pushSettings() {
   if (win && !win.isDestroyed()) win.webContents.send('yc:settings', cfg());
 }
 
-// ── 대기화면 데이터(급식/시간표/공지 등) 주기 갱신 ──
+// ── (A) 공지/설정 갱신 — getBoard만. 자주(BOARD_REFRESH_MS) 돈다. ──
+// NEIS를 쓰지 않아 부하가 미미하고, 긴급공지·학급메모가 빨리 반영돼야 하므로 짧게 둔다.
+// 렌더러엔 board만 실어 보낸다(부분 업데이트) — 실패 시엔 보내지 않아 기존 화면을 유지한다.
 async function refreshBoard() {
   const s = cfg();
   if (!store.isConfigured()) return;
-  const [board, meal, today, week] = await Promise.all([
-    api.getBoard(s.webAppUrl, s.grade, s.classNum),
+  const board = await api.getBoard(s.webAppUrl, s.grade, s.classNum);
+  if (board.ok && board.data && typeof board.data.autoDismiss === 'number') {
+    autoDismissSec = board.data.autoDismiss;
+  }
+  if (board.ok && win && !win.isDestroyed()) {
+    win.webContents.send('yc:board', { board: board.data });
+  }
+}
+
+// ── (B) 급식/시간표 갱신 — getMeal + getTimetable(today/week). 드물게(MEAL_REFRESH_MS) 돈다. ──
+// 성공한 항목만 last-good으로 갱신하고, 실패한 항목은 직전값을 유지한다(NEIS 일시 실패 시 "없음"으로 깜빡이지 않게).
+// 셋 중 하나라도 실패하면 30분을 기다리지 않고 MEAL_RETRY_MS 뒤 1회 더 시도한다(중복 예약 방지).
+async function refreshMeal() {
+  if (!store.isConfigured()) return;
+  if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
+  const s = cfg();
+  const [meal, today, week] = await Promise.all([
     api.getMeal(s.webAppUrl),
     api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'today'),
     api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'week')
   ]);
-  if (board.ok && board.data && typeof board.data.autoDismiss === 'number') {
-    autoDismissSec = board.data.autoDismiss;
-  }
+  if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
+  if (today.ok) lastToday = today.data;
+  if (week.ok) lastWeek = week.data;
   if (win && !win.isDestroyed()) {
     win.webContents.send('yc:board', {
-      board: board.ok ? board.data : null,
-      meal: meal.ok ? meal.data : [],
-      todayTimetable: today.ok ? today.data : [],
-      weekTimetable: week.ok ? week.data : {}
+      meal: lastMeal,
+      todayTimetable: lastToday,
+      weekTimetable: lastWeek
     });
+  }
+  if (!meal.ok || !today.ok || !week.ok) {
+    if (mealRetryTimer) clearTimeout(mealRetryTimer);
+    mealRetryTimer = setTimeout(refreshMeal, MEAL_RETRY_MS);
   }
 }
 
@@ -173,10 +202,14 @@ async function tick() {
 async function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   if (boardTimer) clearInterval(boardTimer);
+  if (mealTimer) clearInterval(mealTimer);
+  if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
+  refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
   await refreshBoard(); // autoDismissSec을 먼저 채워야 첫 알림부터 정확한 카운트다운을 쓴다
   await tick();
   pollTimer = setInterval(tick, POLL_MS);
   boardTimer = setInterval(refreshBoard, BOARD_REFRESH_MS);
+  mealTimer = setInterval(refreshMeal, MEAL_REFRESH_MS);
 }
 
 // ── IPC ──
@@ -253,5 +286,7 @@ app.on('before-quit', () => {
   quitting = true;
   if (pollTimer) clearInterval(pollTimer);
   if (boardTimer) clearInterval(boardTimer);
+  if (mealTimer) clearInterval(mealTimer);
+  if (mealRetryTimer) clearTimeout(mealRetryTimer);
   store.flushSync();
 });

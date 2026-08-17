@@ -114,13 +114,26 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 .agenda-item .ad { font-size: 12px; font-weight: 900; color: var(--blue-d); background: var(--bg); padding: 3px 10px; border-radius: 10px; flex-shrink: 0; }
 .agenda-empty { font-size: 12px; color: var(--text2); }
 
-.mealbox { grid-area: meal; overflow-y: auto; gap: 10px; }
-.meal-slot .mh { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.meal-slot .mt { font-size: 13px; font-weight: 900; color: var(--yellow-ink); background: var(--yellow); padding: 4px 12px; border-radius: 14px; }
-.meal-slot .mk { font-size: 12px; font-weight: 700; color: var(--text2); }
-.meal-slot .mm { font-size: 14px; line-height: 1.65; color: var(--text); }
-.meal-slot .ma { font-size: 11px; color: var(--text2); margin-top: 4px; }
+/* 급식 — 끼니(조/중/석)가 몇 개든 박스 안에서 스크롤 없이 다 보이게 한다.
+   --ms: 넘칠 때 JS(fitMealBox)가 단계적으로 낮추는 글자 배율. 전자칠판은 아무도 스크롤하지 않는다. */
+.mealbox { grid-area: meal; overflow: hidden; }
+#mealList { --ms: 1; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
+.meal-slot { min-height: 0; display: flex; flex-direction: column; }
+/* 끼니가 2개 이상이면 각 끼니를 연한 카드로 묶어 어디까지가 중식인지 한눈에 갈리게 한다 */
+#mealList.multi { gap: 10px; }
+#mealList.multi .meal-slot { background: var(--bg2); border-radius: var(--r); padding: calc(10px * var(--ms)) calc(12px * var(--ms)); }
+.meal-slot .mh { display: flex; align-items: center; gap: 8px; margin-bottom: calc(6px * var(--ms)); flex-shrink: 0; }
+.meal-slot .mt { font-size: calc(13px * var(--ms)); font-weight: 900; color: var(--yellow-ink); background: var(--yellow); padding: calc(4px * var(--ms)) calc(12px * var(--ms)); border-radius: 14px; white-space: nowrap; }
+.meal-slot.dinner .mt { color: #fff; background: var(--blue-d); }
+.meal-slot .mk { font-size: calc(12px * var(--ms)); font-weight: 700; color: var(--text2); white-space: nowrap; }
+.meal-slot .mm { font-size: calc(14px * var(--ms)); line-height: 1.6; color: var(--text); word-break: keep-all; }
+.meal-slot .ma { font-size: calc(11px * var(--ms)); color: var(--text2); margin-top: calc(4px * var(--ms)); }
 .meal-empty { font-size: 12px; color: var(--text2); }
+/* 배율을 최소까지 낮춰도 안 들어가는 저해상도 — 줄간격·여백까지 조인다 */
+#mealList.compact .meal-slot .mm { line-height: 1.35; }
+#mealList.compact.multi { gap: 6px; }
+#mealList.compact.multi .meal-slot { padding: calc(6px * var(--ms)) calc(10px * var(--ms)); }
+#mealList.compact .meal-slot .mh { margin-bottom: calc(3px * var(--ms)); }
 
 .notebox { grid-area: note; background: var(--bg2); box-shadow: var(--sh-in); }
 .notebox .nm { font-size: 15px; line-height: 1.7; color: var(--text); flex: 1; white-space: pre-line; }

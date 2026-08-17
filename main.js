@@ -27,6 +27,7 @@ let mealRetryTimer = null;
 let lastMeal = [];
 let lastToday = [];
 let lastWeek = {};
+let lastBoard = null;   // 렌더러가 준비되기 전에 도착한 board를 잃지 않도록 캐시해 둔다
 
 // ── 호출 상태 머신 ──
 let alertedRows = new Set();  // 이번 실행 동안 이미 알림을 시작한 row (재알림 방지)
@@ -124,6 +125,7 @@ async function refreshBoard() {
   if (board.ok && board.data && typeof board.data.autoDismiss === 'number') {
     autoDismissSec = board.data.autoDismiss;
   }
+  if (board.ok) lastBoard = board.data;
   if (board.ok && win && !win.isDestroyed()) {
     win.webContents.send('yc:board', { board: board.data });
   }
@@ -215,6 +217,15 @@ async function startPolling() {
 // ── IPC ──
 function registerIpc() {
   ipcMain.handle('yc:get-settings', () => cfg());
+  // 렌더러는 DOMContentLoaded 뒤에야 onBoard 리스너를 단다 — 그 전에 폴링이 먼저 끝나면
+  // 첫 데이터가 통째로 유실돼 급식은 30분, 공지는 3분 동안 "불러오는 중..."에 머물렀다.
+  // 렌더러가 준비되면 이걸 한 번 당겨가 즉시 그린다(서버를 다시 부르지 않는다).
+  ipcMain.handle('yc:get-snapshot', () => ({
+    board: lastBoard,
+    meal: lastMeal,
+    todayTimetable: lastToday,
+    weekTimetable: lastWeek
+  }));
   ipcMain.handle('yc:save-settings', (e, patch) => {
     const next = store.save(patch);
     if (typeof patch.autoLaunch === 'boolean') applyAutoLaunch(patch.autoLaunch);

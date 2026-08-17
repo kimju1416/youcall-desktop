@@ -5,6 +5,7 @@ const inv = (ch, ...a) => ipcRenderer.invoke(ch, ...a);
 
 contextBridge.exposeInMainWorld('yc', {
   getSettings: () => inv('yc:get-settings'),
+  getSnapshot: () => inv('yc:get-snapshot'),
   saveSettings: patch => inv('yc:save-settings', patch),
   getTts: text => inv('yc:get-tts', text),
   testConnection: (webAppUrl, grade, classNum) => inv('yc:test-connection', { webAppUrl, grade, classNum }),

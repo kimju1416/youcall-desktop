@@ -159,9 +159,11 @@ function renderMeal(meals) {
   var el = document.getElementById('mealList'); if (!el) return;
   if (!meals || !meals.length) { el.innerHTML = '<div class="meal-empty">오늘은 급식이 없어요</div>'; return; }
   el.innerHTML = '';
+  el.className = (meals.length > 1) ? 'multi' : '';
   var typeIcon = { '조식': '🌅', '중식': '🍚', '석식': '🌙' };
   meals.forEach(function (m) {
     var wrap = document.createElement('div'); wrap.className = 'meal-slot';
+    if (String(m.type).indexOf('석') === 0) wrap.className += ' dinner';
     var mh = document.createElement('div'); mh.className = 'mh';
     var mt = document.createElement('div'); mt.className = 'mt'; mt.textContent = (typeIcon[m.type] || '🍽️') + ' ' + m.type;
     mh.appendChild(mt);
@@ -174,7 +176,33 @@ function renderMeal(meals) {
     }
     el.appendChild(wrap);
   });
+  fitMealBox();
+  // 웹폰트가 늦게 적용되면 첫 측정이 실제보다 작게 나와 배율이 덜 낮아진다 — 폰트 준비 후 다시 맞춘다
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { fitMealBox(); });
 }
+/* 급식이 박스를 넘치면 글자 배율(--ms)을 단계적으로 낮춰 스크롤 없이 다 보이게 맞춘다.
+   중식+석식이 함께 있는 고등학교에서 석식이 아래로 잘리던 문제. */
+function fitMealBox() {
+  var el = document.getElementById('mealList'); if (!el) return;
+  var steps = [1, .94, .88, .82, .76, .7, .66, .62];
+  el.classList.remove('compact');
+  el.style.overflowY = 'hidden';
+  for (var i = 0; i < steps.length; i++) {
+    el.style.setProperty('--ms', String(steps[i]));
+    if (el.scrollHeight <= el.clientHeight + 1) return;
+  }
+  el.classList.add('compact');
+  for (var j = 0; j < steps.length; j++) {
+    el.style.setProperty('--ms', String(steps[j]));
+    if (el.scrollHeight <= el.clientHeight + 1) return;
+  }
+  el.style.overflowY = 'auto';
+}
+var _fitTimer = null;
+window.addEventListener('resize', function () {
+  clearTimeout(_fitTimer);
+  _fitTimer = setTimeout(fitMealBox, 200);
+});
 function renderPeriodRow(list) {
   _todaySubjects = {};
   (list || []).forEach(function (x) { _todaySubjects[x.period] = x.subject; });
@@ -357,6 +385,26 @@ window.addEventListener('DOMContentLoaded', async function () {
     if (data.todayTimetable !== undefined) renderPeriodRow(data.todayTimetable);
     if (data.weekTimetable !== undefined) renderWeek(data.weekTimetable);
   });
+
+  // 리스너를 단 직후, 이미 받아둔 값이 있으면 즉시 그린다(첫 폴링 결과 유실 방지 — main의 캐시를 당겨온다)
+  if (window.yc.getSnapshot) {
+    try {
+      var snap = await window.yc.getSnapshot();
+      if (snap) {
+        if (snap.board) {
+          document.documentElement.setAttribute('data-theme', String(snap.board.theme || 1));
+          document.getElementById('sBadge').textContent = (snap.board.schoolName ? snap.board.schoolName + ' ' : '') + SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
+          renderNotice(snap.board.notice);
+          renderClassMemo(snap.board.classMemo);
+          renderAgenda(snap.board.agenda);
+          if (snap.board.periodConfig) { PERIOD_CONFIG = snap.board.periodConfig; SCHEDULE = buildSchedule(PERIOD_CONFIG); }
+        }
+        if (snap.meal && snap.meal.length) renderMeal(snap.meal);
+        if (snap.todayTimetable && snap.todayTimetable.length) renderPeriodRow(snap.todayTimetable);
+        if (snap.weekTimetable && Object.keys(snap.weekTimetable).length) renderWeek(snap.weekTimetable);
+      }
+    } catch (e) { /* 스냅샷이 없으면 다음 폴링을 기다린다 */ }
+  }
 
   window.yc.onAlert(showAlert);
   window.yc.onStandby(showStandby);

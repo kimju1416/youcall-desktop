@@ -149,7 +149,6 @@ function renderNotice(notice, step) {
   if (!bar || !txt) return;
   if (step !== undefined && step !== null) NOTICE_STEP = step; // 값이 안 오면 이전 설정을 유지
   var n = parseInt(NOTICE_STEP, 10); if (!(n >= 1 && n <= 5)) n = 1;
-  bar.classList.toggle('big', n > 1);
   if (notice && notice.trim()) { txt.textContent = notice; bar.classList.add('show'); } else { bar.classList.remove('show'); }
   fitNoticeBar();
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitAll);
@@ -164,17 +163,18 @@ function renderClassMemo(memo, step) {
 }
 /* 고른 크기로 키우되, 박스를 넘치면 넘치지 않는 선까지 되돌린다(하한 1 = 기존 크기).
    전자칠판은 아무도 스크롤하지 않으므로 넘치면 그대로 안 보이게 된다. */
-function fitScaledBox(hostEl, varName, wantScale, overflows) {
+function fitScaledBox(hostEl, varName, wantScale, overflows, minScale) {
   if (!hostEl) return 1;
+  var lo = (minScale === undefined) ? 1 : minScale; // 기본 하한은 기존 크기
   var s = wantScale;
   hostEl.style.setProperty(varName, String(s));
-  if (s <= 1 || !overflows()) return s;
+  if (s <= lo || !overflows()) return s;
   // 0.05 격자에 맞춰 내려간다 — 시작 배율이 달라도 같은 한계에서 멈춰 단계 역전이 없다
-  s = Math.max(1, Math.floor(s / 0.05) * 0.05);
+  s = Math.max(lo, Math.floor(s / 0.05) * 0.05);
   var guard = 0;
   hostEl.style.setProperty(varName, String(+s.toFixed(2)));
-  while (s > 1.001 && overflows() && guard++ < 40) {
-    s = Math.max(1, +(s - 0.05).toFixed(2));
+  while (s > lo + 0.001 && overflows() && guard++ < 40) {
+    s = Math.max(lo, +(s - 0.05).toFixed(2));
     hostEl.style.setProperty(varName, String(s));
   }
   return s;
@@ -195,9 +195,10 @@ function fitClassMemo() {
   var el = document.getElementById('classMemoText'); if (!el) return;
   // 재는 동안 스크롤바가 뜨면 폭이 줄어 줄 수가 달라진다(배율이 과하게 깎임) — 급식과 같이 숨기고 잰다
   el.style.overflowY = 'hidden';
+  // 아주 긴 메모는 기본 크기로도 넘친다 — 그때는 0.7까지 줄여서라도 다 보이게 한다
   fitScaledBox(el, '--msc', fontScale(MEMO_STEP), function () {
     return el.scrollHeight > el.clientHeight + 2;
-  });
+  }, 0.7);
   if (el.scrollHeight > el.clientHeight + 2) el.style.overflowY = 'auto';
 }
 /* 급식이 자리를 못 찾을 때 공지 배너를 한 칸(0.05) 양보시킨다. 기본 크기(1) 아래로는 안 내려간다. */
@@ -252,7 +253,8 @@ function renderMeal(meals) {
 function fitMealBox() {
   var el = document.getElementById('mealList'); if (!el) return;
   // 남으면 키우고, 넘치면 줄인다. 큰 배율부터 시도해 박스에 처음 들어가는 값을 쓴다.
-  var steps = [1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1, .94, .88, .82, .76, .7, .66, .62];
+  var steps = [1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1, .94, .88, .82, .76, .7, .66, .62, .56, .5];
+  el.classList.remove('no-allergy'); // 화면이 다시 넓어지면 알레르기를 되살린다
   // 공지 배너를 키우면 그만큼 본문이 줄어든다. 최소 배율로도 안 들어가면 배너를 양보시킨다.
   for (var attempt = 0; attempt < 20; attempt++) {
     el.classList.remove('compact');
@@ -265,6 +267,14 @@ function fitMealBox() {
     for (var j = steps.indexOf(1); j < steps.length; j++) {
       el.style.setProperty('--ms', String(steps[j]));
       if (el.scrollHeight <= el.clientHeight + 1) return;
+    }
+    // 3단계: 알레르기 줄을 접어 자리를 만든다(3끼니 저해상도에서만 발동)
+    if (!el.classList.contains('no-allergy') && el.querySelector('.ma')) {
+      el.classList.add('no-allergy');
+      for (var k = steps.indexOf(1); k < steps.length; k++) {
+        el.style.setProperty('--ms', String(steps[k]));
+        if (el.scrollHeight <= el.clientHeight + 1) return;
+      }
     }
     if (!shrinkNoticeForSpace()) break;
   }

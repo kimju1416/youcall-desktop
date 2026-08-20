@@ -134,16 +134,83 @@ function currentPeriodStatus(nowMin) {
 }
 
 var _todaySubjects = {};
-function renderNotice(notice) {
+
+/* 설정 시트 C열의 글자 크기 5단계 → 실제 배율. 1단계가 기존 크기다.
+   값은 ?api=board 응답(noticeStep/memoStep)으로 내려온다. */
+var FONT_SCALES = [1, 1.18, 1.35, 1.55, 1.8];
+var NOTICE_STEP = 1, MEMO_STEP = 1;
+function fontScale(step) {
+  var n = parseInt(step, 10);
+  if (!(n >= 1 && n <= 5)) n = 1;
+  return FONT_SCALES[n - 1];
+}
+function renderNotice(notice, step) {
   var bar = document.getElementById('noticeBar'), txt = document.getElementById('noticeText');
   if (!bar || !txt) return;
+  if (step !== undefined && step !== null) NOTICE_STEP = step; // 값이 안 오면 이전 설정을 유지
+  var n = parseInt(NOTICE_STEP, 10); if (!(n >= 1 && n <= 5)) n = 1;
+  bar.classList.toggle('big', n > 1);
   if (notice && notice.trim()) { txt.textContent = notice; bar.classList.add('show'); } else { bar.classList.remove('show'); }
+  fitNoticeBar();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitAll);
 }
-function renderClassMemo(memo) {
+function renderClassMemo(memo, step) {
   var el = document.getElementById('classMemoText'); if (!el) return;
+  if (step !== undefined && step !== null) MEMO_STEP = step;
   if (memo && memo.trim()) { el.textContent = memo; el.classList.remove('empty'); }
   else { el.textContent = '설정 시트 "학급 메모"에 문구를 입력하면 여기에 표시됩니다.'; el.classList.add('empty'); }
+  fitClassMemo();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitAll);
 }
+/* 고른 크기로 키우되, 박스를 넘치면 넘치지 않는 선까지 되돌린다(하한 1 = 기존 크기).
+   전자칠판은 아무도 스크롤하지 않으므로 넘치면 그대로 안 보이게 된다. */
+function fitScaledBox(hostEl, varName, wantScale, overflows) {
+  if (!hostEl) return 1;
+  var s = wantScale;
+  hostEl.style.setProperty(varName, String(s));
+  if (s <= 1 || !overflows()) return s;
+  // 0.05 격자에 맞춰 내려간다 — 시작 배율이 달라도 같은 한계에서 멈춰 단계 역전이 없다
+  s = Math.max(1, Math.floor(s / 0.05) * 0.05);
+  var guard = 0;
+  hostEl.style.setProperty(varName, String(+s.toFixed(2)));
+  while (s > 1.001 && overflows() && guard++ < 40) {
+    s = Math.max(1, +(s - 0.05).toFixed(2));
+    hostEl.style.setProperty(varName, String(s));
+  }
+  return s;
+}
+var NOTICE_MAX_LINES = 3;
+function fitNoticeBar() {
+  var bar = document.getElementById('noticeBar'), txt = document.getElementById('noticeText');
+  if (!bar || !txt || !bar.classList.contains('show')) return;
+  fitScaledBox(bar, '--nsc', fontScale(NOTICE_STEP), function () {
+    var cs = getComputedStyle(txt);
+    var lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.3;
+    if (Math.round(txt.scrollHeight / lh) > NOTICE_MAX_LINES) return true;
+    if (txt.scrollWidth > txt.clientWidth + 1) return true;
+    return bar.getBoundingClientRect().height > window.innerHeight * 0.25;
+  });
+}
+function fitClassMemo() {
+  var el = document.getElementById('classMemoText'); if (!el) return;
+  // 재는 동안 스크롤바가 뜨면 폭이 줄어 줄 수가 달라진다(배율이 과하게 깎임) — 급식과 같이 숨기고 잰다
+  el.style.overflowY = 'hidden';
+  fitScaledBox(el, '--msc', fontScale(MEMO_STEP), function () {
+    return el.scrollHeight > el.clientHeight + 2;
+  });
+  if (el.scrollHeight > el.clientHeight + 2) el.style.overflowY = 'auto';
+}
+/* 급식이 자리를 못 찾을 때 공지 배너를 한 칸(0.05) 양보시킨다. 기본 크기(1) 아래로는 안 내려간다. */
+function shrinkNoticeForSpace() {
+  var bar = document.getElementById('noticeBar');
+  if (!bar || !bar.classList.contains('show')) return false;
+  var cur = parseFloat(bar.style.getPropertyValue('--nsc')) || 1;
+  if (cur <= 1.001) return false;
+  bar.style.setProperty('--nsc', String(Math.max(1, +(cur - 0.05).toFixed(2))));
+  return true;
+}
+/* 세 박스는 서로 자리를 나눠 쓰므로 항상 같은 순서로 다시 맞춘다 — 공지 → 메모 → 급식. */
+function refitAll() { fitNoticeBar(); fitClassMemo(); fitMealBox(); }
 function renderAgenda(agenda) {
   var el = document.getElementById('agendaList'); if (!el) return;
   if (!agenda || !agenda.length) { el.innerHTML = '<div class="agenda-empty">예정된 일정이 없습니다</div>'; return; }
@@ -178,30 +245,35 @@ function renderMeal(meals) {
   });
   fitMealBox();
   // 웹폰트가 늦게 적용되면 첫 측정이 실제보다 작게 나와 배율이 덜 낮아진다 — 폰트 준비 후 다시 맞춘다
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { fitMealBox(); });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(refitAll);
 }
 /* 급식이 박스를 넘치면 글자 배율(--ms)을 단계적으로 낮춰 스크롤 없이 다 보이게 맞춘다.
    중식+석식이 함께 있는 고등학교에서 석식이 아래로 잘리던 문제. */
 function fitMealBox() {
   var el = document.getElementById('mealList'); if (!el) return;
-  var steps = [1, .94, .88, .82, .76, .7, .66, .62];
-  el.classList.remove('compact');
-  el.style.overflowY = 'hidden';
-  for (var i = 0; i < steps.length; i++) {
-    el.style.setProperty('--ms', String(steps[i]));
-    if (el.scrollHeight <= el.clientHeight + 1) return;
-  }
-  el.classList.add('compact');
-  for (var j = 0; j < steps.length; j++) {
-    el.style.setProperty('--ms', String(steps[j]));
-    if (el.scrollHeight <= el.clientHeight + 1) return;
+  // 남으면 키우고, 넘치면 줄인다. 큰 배율부터 시도해 박스에 처음 들어가는 값을 쓴다.
+  var steps = [1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1, .94, .88, .82, .76, .7, .66, .62];
+  // 공지 배너를 키우면 그만큼 본문이 줄어든다. 최소 배율로도 안 들어가면 배너를 양보시킨다.
+  for (var attempt = 0; attempt < 20; attempt++) {
+    el.classList.remove('compact');
+    el.style.overflowY = 'hidden';
+    for (var i = 0; i < steps.length; i++) {
+      el.style.setProperty('--ms', String(steps[i]));
+      if (el.scrollHeight <= el.clientHeight + 1) return;
+    }
+    el.classList.add('compact'); // 여긴 축소 전용이므로 1 이하만 쓴다
+    for (var j = steps.indexOf(1); j < steps.length; j++) {
+      el.style.setProperty('--ms', String(steps[j]));
+      if (el.scrollHeight <= el.clientHeight + 1) return;
+    }
+    if (!shrinkNoticeForSpace()) break;
   }
   el.style.overflowY = 'auto';
 }
 var _fitTimer = null;
 window.addEventListener('resize', function () {
   clearTimeout(_fitTimer);
-  _fitTimer = setTimeout(fitMealBox, 200);
+  _fitTimer = setTimeout(refitAll, 200);
 });
 function renderPeriodRow(list) {
   _todaySubjects = {};
@@ -376,8 +448,8 @@ window.addEventListener('DOMContentLoaded', async function () {
     if (data.board) {
       document.documentElement.setAttribute('data-theme', String(data.board.theme || 1));
       document.getElementById('sBadge').textContent = (data.board.schoolName ? data.board.schoolName + ' ' : '') + SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
-      renderNotice(data.board.notice);
-      renderClassMemo(data.board.classMemo);
+      renderNotice(data.board.notice, data.board.noticeStep);
+      renderClassMemo(data.board.classMemo, data.board.memoStep);
       renderAgenda(data.board.agenda);
       if (data.board.periodConfig) { PERIOD_CONFIG = data.board.periodConfig; SCHEDULE = buildSchedule(PERIOD_CONFIG); }
     }
@@ -394,8 +466,8 @@ window.addEventListener('DOMContentLoaded', async function () {
         if (snap.board) {
           document.documentElement.setAttribute('data-theme', String(snap.board.theme || 1));
           document.getElementById('sBadge').textContent = (snap.board.schoolName ? snap.board.schoolName + ' ' : '') + SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
-          renderNotice(snap.board.notice);
-          renderClassMemo(snap.board.classMemo);
+          renderNotice(snap.board.notice, snap.board.noticeStep);
+          renderClassMemo(snap.board.classMemo, snap.board.memoStep);
           renderAgenda(snap.board.agenda);
           if (snap.board.periodConfig) { PERIOD_CONFIG = snap.board.periodConfig; SCHEDULE = buildSchedule(PERIOD_CONFIG); }
         }

@@ -210,8 +210,50 @@ function shrinkNoticeForSpace() {
   bar.style.setProperty('--nsc', String(Math.max(1, +(cur - 0.05).toFixed(2))));
   return true;
 }
-/* 세 박스는 서로 자리를 나눠 쓰므로 항상 같은 순서로 다시 맞춘다 — 공지 → 메모 → 급식. */
-function refitAll() { fitNoticeBar(); fitClassMemo(); fitMealBox(); }
+/* 주간 시간표 표가 우측 하단 소리 설정 패널에 가리지 않게 아래 여백을 실측으로 맞춘다. */
+function fitWeekBox() {
+  var wrap = document.getElementById('weekWrap'); if (!wrap) return;
+  var panel = document.querySelector('.s-settings'); if (!panel) return;
+  var tbl = wrap.querySelector('table'); if (!tbl) return;
+  wrap.style.paddingBottom = '';               // 화면이 넓어지면 여백·배율을 원복하고 다시 잰다
+  tbl.style.setProperty('--ws', 1);
+  var p = panel.getBoundingClientRect();
+  // 패널이 숨겨져 있으면(rect 0) 피할 대상이 없다 — 없는 것을 피하려다 표를 망가뜨리면 안 된다
+  if (!panel.offsetParent || p.width < 1 || p.height < 1) return;
+  if (tbl.getBoundingClientRect().right <= p.left + 1) return;
+  // 1) 아래 여백을 늘려 표를 위로 민다
+  for (var i = 0; i < 6; i++) {
+    var over = tbl.getBoundingClientRect().bottom - p.top + 8;
+    if (over <= 0) return;
+    var cur = parseFloat(getComputedStyle(wrap).paddingBottom) || 0;
+    wrap.style.paddingBottom = (cur + over) + 'px';
+  }
+  // 2) 표가 이미 최소 높이면 글자·행 높이를 낮춘다(하한 0.7)
+  var ws = 1;
+  while (ws > 0.701 && tbl.getBoundingClientRect().bottom > p.top + 1) {
+    ws = Math.max(0.7, +(ws - 0.05).toFixed(2));
+    tbl.style.setProperty('--ws', ws);
+  }
+}
+/* 주간 시간표가 소리 설정 패널에 실제로 가리는지 */
+function weekCoversPanel() {
+  var tbl = document.querySelector('#weekWrap table'), panel = document.querySelector('.s-settings');
+  if (!tbl || !panel || !panel.offsetParent) return false; // 숨겨진 패널은 가릴 것도 없다
+  var t = tbl.getBoundingClientRect(), p = panel.getBoundingClientRect();
+  if (p.width < 1 || p.height < 1) return false;
+  return t.bottom > p.top + 1 && t.right > p.left + 1;
+}
+/* 박스들이 서로 자리를 나눠 쓰므로 항상 같은 순서로 다시 맞춘다 — 공지 → 메모 → 급식 → 주간표.
+   저해상도에서 배너를 키우면 본문이 밀려 시간표 마지막 교시가 소리 패널 밑으로 들어간다.
+   그때는 배너를 한 칸씩 양보시킨다 — 학생이 봐야 할 시간표가 공지 크기보다 우선이다. */
+function refitAll() {
+  fitNoticeBar();
+  for (var i = 0; i < 24; i++) {
+    fitClassMemo(); fitMealBox(); fitWeekBox();
+    if (!weekCoversPanel()) return;
+    if (!shrinkNoticeForSpace()) return;
+  }
+}
 function renderAgenda(agenda) {
   var el = document.getElementById('agendaList'); if (!el) return;
   if (!agenda || !agenda.length) { el.innerHTML = '<div class="agenda-empty">예정된 일정이 없습니다</div>'; return; }
@@ -322,6 +364,8 @@ function renderWeek(weekMap) {
   }
   html += '</tbody></table>';
   wrap.innerHTML = html;
+  fitWeekBox(); // 표를 새로 그렸으니 소리 패널과 겹치지 않게 다시 잰다
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitWeekBox);
 }
 function ymdKey(d) { return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'); }
 

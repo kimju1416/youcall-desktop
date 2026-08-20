@@ -151,12 +151,14 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 /* 우측 하단에 항상 떠 있는 소리 설정 패널(.s-settings, 실측 높이 약 235px)과 겹치지 않도록
    표 아래에 그만큼 여백을 예약해둔다 — 값을 바꾸면 .s-settings 크기도 함께 확인할 것. */
 #weekWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 250px; }
-table.week { width: 100%; border-collapse: collapse; font-size: clamp(12px,0.8vw,20px); flex: 1; }
-table.week th { font-weight: 700; color: var(--text2); padding: 7px 4px; font-size: clamp(11px,0.72vw,18px); }
+/* --ws: 표가 우측 하단 소리 설정 패널에 가릴 때 JS(fitWeekBox)가 낮추는 배율.
+   저해상도에서 마지막 교시 행이 패널 밑으로 들어가던 문제. */
+table.week { --ws: 1; width: 100%; border-collapse: collapse; font-size: calc(clamp(12px,0.8vw,20px) * var(--ws)); flex: 1; }
+table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(--ws)) 4px; font-size: calc(clamp(11px,0.72vw,18px) * var(--ws)); }
 table.week th.today { color: var(--blue-d); }
-table.week td { text-align: center; padding: 6px 4px; border-top: 1px solid var(--border); font-weight: 500; }
+table.week td { text-align: center; padding: calc(6px * var(--ws)) 4px; border-top: 1px solid var(--border); font-weight: 500; }
 table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
-table.week td.pnum { color: var(--text2); font-size: clamp(10px,0.67vw,16px); width: 32px; }
+table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
 .week-empty { font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
 
 .s-settings { position: absolute; bottom: 16px; right: 16px; opacity: .65; transition: opacity .3s; }

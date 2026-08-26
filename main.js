@@ -36,6 +36,19 @@ let autoDismissSec = 30;      // board 데이터로 갱신됨
 
 function cfg() { return store.load(); }
 
+// 창이 살아 있어도 webContents만 먼저 파괴되는 순간이 있다 — 종료 중이면 아예 건드리지 않는다.
+function alive() {
+  return !quitting && win && !win.isDestroyed()
+      && win.webContents && !win.webContents.isDestroyed();
+}
+
+function stopAllTimers() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
+  if (mealTimer) { clearInterval(mealTimer); mealTimer = null; }
+  if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
+}
+
 function createWindow() {
   const s = cfg();
   const bounds = s.windowBounds || { width: 960, height: 640 };
@@ -69,7 +82,9 @@ function createWindow() {
 }
 
 function showAndFocus() {
-  if (!win) return;
+  // 종료 중에 창을 다시 띄우면 윈도우 종료가 그만큼 더 막힌다
+  if (quitting) return;
+  if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
@@ -86,6 +101,9 @@ function notifyNewCall(call) {
 
 // ── 트레이 ──
 function refreshTrayMenu() {
+  // 종료가 시작되면 트레이는 이미 파괴됐을 수 있다 — 건드리면 'Object has been destroyed'가 난다
+  if (quitting) return;
+  if (!tray || tray.isDestroyed()) return;
   const s = cfg();
   const menu = Menu.buildFromTemplate([
     { label: '열기', click: showAndFocus },
@@ -112,21 +130,23 @@ function applyAutoLaunch(on) {
 }
 
 function pushSettings() {
-  if (win && !win.isDestroyed()) win.webContents.send('yc:settings', cfg());
+  if (alive()) win.webContents.send('yc:settings', cfg());
 }
 
 // ── (A) 공지/설정 갱신 — getBoard만. 자주(BOARD_REFRESH_MS) 돈다. ──
 // NEIS를 쓰지 않아 부하가 미미하고, 긴급공지·학급메모가 빨리 반영돼야 하므로 짧게 둔다.
 // 렌더러엔 board만 실어 보낸다(부분 업데이트) — 실패 시엔 보내지 않아 기존 화면을 유지한다.
 async function refreshBoard() {
+  if (quitting) return;
   const s = cfg();
   if (!store.isConfigured()) return;
   const board = await api.getBoard(s.webAppUrl, s.grade, s.classNum);
+  if (quitting) return;   // 응답을 기다리는 사이에 종료가 시작됐을 수 있다
   if (board.ok && board.data && typeof board.data.autoDismiss === 'number') {
     autoDismissSec = board.data.autoDismiss;
   }
   if (board.ok) lastBoard = board.data;
-  if (board.ok && win && !win.isDestroyed()) {
+  if (board.ok && alive()) {
     win.webContents.send('yc:board', { board: board.data });
   }
 }
@@ -135,6 +155,7 @@ async function refreshBoard() {
 // 성공한 항목만 last-good으로 갱신하고, 실패한 항목은 직전값을 유지한다(NEIS 일시 실패 시 "없음"으로 깜빡이지 않게).
 // 셋 중 하나라도 실패하면 30분을 기다리지 않고 MEAL_RETRY_MS 뒤 1회 더 시도한다(중복 예약 방지).
 async function refreshMeal() {
+  if (quitting) return;
   if (!store.isConfigured()) return;
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
   const s = cfg();
@@ -143,10 +164,11 @@ async function refreshMeal() {
     api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'today'),
     api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'week')
   ]);
+  if (quitting) return;   // 응답을 기다리는 사이에 종료가 시작됐을 수 있다
   if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
   if (today.ok) lastToday = today.data;
   if (week.ok) lastWeek = week.data;
-  if (win && !win.isDestroyed()) {
+  if (alive()) {
     win.webContents.send('yc:board', {
       meal: lastMeal,
       todayTimetable: lastToday,
@@ -163,6 +185,7 @@ async function refreshMeal() {
 // 웹 학생화면(index.html)의 checkStudent/showStudentAlert/startCountdown과 동일한 동작을
 // 메인 프로세스 쪽 상태 머신으로 재구현한 것 — 렌더러가 숨겨져 있어도 정확히 돈다.
 async function tick() {
+  if (quitting) return;
   const s = cfg();
   if (!store.isConfigured()) return;
 
@@ -173,6 +196,7 @@ async function tick() {
   }
 
   const res = await api.getCalls(s.webAppUrl, s.grade, s.classNum);
+  if (quitting) return;   // 응답을 기다리는 사이에 종료가 시작됐을 수 있다
   if (!res.ok) return; // 네트워크 오류 — 다음 폴링에서 재시도, 화면 상태는 그대로 둔다
 
   const calls = res.data || [];
@@ -184,13 +208,13 @@ async function tick() {
       alertedRows.add(fresh.row);
       current = Object.assign({}, fresh, { deadlineAt: Date.now() + autoDismissSec * 1000, totalSec: autoDismissSec });
       const queueCount = calls.filter(c => c.row !== fresh.row).length;
-      if (win && !win.isDestroyed()) win.webContents.send('yc:alert', { call: current, queueCount });
+      if (alive()) win.webContents.send('yc:alert', { call: current, queueCount });
 
       if (s.autoRestoreOnCall) showAndFocus();
       else notifyNewCall(fresh);
       return;
     }
-    if (calls.length === 0 && win && !win.isDestroyed()) {
+    if (calls.length === 0 && alive()) {
       win.webContents.send('yc:standby');
     }
     return;
@@ -198,7 +222,7 @@ async function tick() {
 
   // 이미 표시 중인 호출이 있으면 대기열 숫자만 갱신
   const queueCount = calls.filter(c => c.row !== current.row).length;
-  if (win && !win.isDestroyed()) win.webContents.send('yc:alert', { call: current, queueCount });
+  if (alive()) win.webContents.send('yc:alert', { call: current, queueCount });
 }
 
 async function startPolling() {
@@ -291,13 +315,35 @@ app.whenReady().then(() => {
   startPolling();
 });
 
-app.on('window-all-closed', e => { if (SMOKE) app.quit(); else e.preventDefault(); }); // 트레이 상주 — 창이 닫혀도 앱은 유지
+// 메인 프로세스에서 예외가 새어 나오면 Electron이 'A JavaScript error occurred…'
+// 대화상자를 띄우는데, 그 창이 떠 있는 동안 윈도우 종료가 통째로 막힌다.
+// 오류는 삼키지 않고 userData\error.log에 남긴다.
+function logError(tag, err) {
+  try {
+    const line = new Date().toISOString() + '  [' + tag + ']  ' + ((err && err.stack) || err) + '\n';
+    fs.appendFileSync(path.join(app.getPath('userData'), 'error.log'), line, 'utf8');
+  } catch (e) { /* 로그조차 못 남기는 상황이면 조용히 넘어간다 */ }
+}
+process.on('uncaughtException',  err => logError('uncaught',  err));
+process.on('unhandledRejection', err => logError('rejection', err));
+
+// 트레이 상주 — 창이 닫혀도 앱은 유지. 단 종료 중이라면 붙잡지 않는다.
+app.on('window-all-closed', e => { if (SMOKE || quitting) app.quit(); else e.preventDefault(); });
 
 app.on('before-quit', () => {
   quitting = true;
-  if (pollTimer) clearInterval(pollTimer);
-  if (boardTimer) clearInterval(boardTimer);
-  if (mealTimer) clearInterval(mealTimer);
-  if (mealRetryTimer) clearTimeout(mealRetryTimer);
+  stopAllTimers();
   store.flushSync();
+});
+
+// 윈도우 종료·재시작·로그오프.
+// 이때는 app.quit()이 불리지 않아 before-quit도 안 온다 — 폴링이 그대로 살아
+// 이미 파괴된 창·트레이를 건드리다 오류 대화상자를 띄우고 종료를 막는다.
+// 여기서 스스로 물러나야 윈도우가 기다리지 않는다.
+app.on('session-end', () => {
+  quitting = true;
+  stopAllTimers();
+  try { store.flushSync(); } catch (e) {}          // 설정·창 위치는 잃지 않는다
+  try { if (tray && !tray.isDestroyed()) tray.destroy(); } catch (e) {}
+  try { app.exit(0); } catch (e) {}
 });

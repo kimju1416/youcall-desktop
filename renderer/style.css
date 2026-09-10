@@ -108,6 +108,13 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 .period .ps { font-size: 20px; font-weight: 900; }
 .period.now .ps { color: #fff; }
 .period.lunch .ps { color: var(--yellow-ink); font-size: 17px; }
+/* 컴시간 교체 수업(서버 v4.24) — 색만으로 구분하지 않고 «교체» 글자와 «원래 과목»을 함께 보인다(웹 칠판과 같은 규칙).
+   .period.now보다 뒤에 둬야 교체 테두리가 보이고, 지금 교시이면서 교체인 칸은 .chg.now가 둘 다 살린다. */
+.period.chg { box-shadow: inset 0 0 0 3px var(--yellow-d); }
+.period.chg.now { box-shadow: inset 0 0 0 3px #fff, 2px 2px 8px var(--blue-d); }
+.period .chg-tag { display: inline-block; font-size: .9em; font-weight: 900; color: var(--yellow-ink); background: var(--yellow); border-radius: 8px; padding: 1px 7px; margin-left: 4px; }
+.period .po { font-size: 11px; font-weight: 700; color: var(--text2); margin-top: -4px; }
+.period.now .po { color: rgba(255,255,255,.85); }
 .today-empty { font-size: 13px; color: var(--text2); }
 
 .agendabox { grid-area: agenda; gap: 8px; overflow-y: auto; }
@@ -158,6 +165,10 @@ table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(-
 table.week th.today { color: var(--blue-d); }
 table.week td { text-align: center; padding: calc(6px * var(--ws)) 4px; border-top: 1px solid var(--border); font-weight: 500; }
 table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
+/* 교체 칸은 오늘 열 색보다 뒤에 둔다 — 오늘이면서 교체인 칸도 교체 색으로 보이게 */
+table.week td.chg { background: #fff1c9; color: var(--yellow-ink); font-weight: 900; border-radius: 8px; box-shadow: inset 0 0 0 2px var(--yellow-d); }
+.week-legend { display: flex; align-items: center; gap: 6px; font-size: clamp(10px,0.62vw,15px); font-weight: 700; color: var(--yellow-ink); margin-bottom: 4px; flex-shrink: 0; }
+.week-legend .sw { width: 1.1em; height: 1.1em; border-radius: 4px; background: #fff1c9; box-shadow: inset 0 0 0 2px var(--yellow-d); }
 table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
 .week-empty { font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
 

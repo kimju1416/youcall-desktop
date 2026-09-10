@@ -22,11 +22,19 @@ let pollTimer = null;
 let boardTimer = null;
 let mealTimer = null;
 let mealRetryTimer = null;
+// 폴링 «세대» — startPolling·stopAllTimers가 부를 때마다 1씩 오른다.
+// 예전엔 startPolling이 await 뒤에 setInterval을 만들어, 응답을 기다리는 사이 또 불리면(볼륨 슬라이더를 끌 때마다
+// 설정 저장 → 재시작) 3초·3분·30분 타이머가 겹겹이 쌓였다. 기다렸다 돌아온 쪽은 세대가 바뀌었으면 아무것도 만들지 않는다.
+let pollGen = 0;
+const confirmRetryTimers = new Set();   // 호출 확인 재시도 예약 — 종료·재시작 때 stopAllTimers가 함께 지운다
+const CONFIRM_RETRY_MS = [2000, 5000, 10000];
+const CLASS_NO_MSG = '학년·반은 숫자만 입력해 주세요 (예: 3, 2)';
 
 // ── 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다 ──
 let lastMeal = [];
-let lastToday = [];
-let lastWeek = {};
+// 시간표는 null(한 번도 못 받음)과 []·{}(받았는데 비었음)를 가른다 — 못 받은 걸 «오늘은 수업이 없어요»로 그리지 않게
+let lastToday = null;
+let lastWeek = null;
 let lastBoard = null;   // 렌더러가 준비되기 전에 도착한 board를 잃지 않도록 캐시해 둔다
 
 // ── 호출 상태 머신 ──
@@ -35,6 +43,8 @@ let current = null;           // 지금 화면에 보여주고 있는 호출 { r
 let autoDismissSec = 30;      // board 데이터로 갱신됨
 
 function cfg() { return store.load(); }
+// 서버에 보낼 학년·반 — 저장값은 켤 때·저장할 때 이미 맞추지만, 스모크(--settings)처럼 우회한 값도 숫자로 보낸다
+function classOf(s) { return { grade: store.normClassNo(s.grade), classNum: store.normClassNo(s.classNum) }; }
 
 // 창이 살아 있어도 webContents만 먼저 파괴되는 순간이 있다 — 종료 중이면 아예 건드리지 않는다.
 function alive() {
@@ -43,10 +53,13 @@ function alive() {
 }
 
 function stopAllTimers() {
+  pollGen++;   // 응답을 기다리던 startPolling·tick·refresh는 돌아와서 세대가 바뀐 걸 보고 타이머를 만들지 않는다
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   if (mealTimer) { clearInterval(mealTimer); mealTimer = null; }
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
+  confirmRetryTimers.forEach(t => clearTimeout(t));
+  confirmRetryTimers.clear();
 }
 
 function createWindow() {
@@ -88,6 +101,20 @@ function showAndFocus() {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
+}
+
+// ── 단일 인스턴스 ──
+// 자동 실행으로 트레이에 떠 있는데 바탕화면 아이콘을 또 누르면 유콜 데스크가 둘이 돌아
+// 호출 하나에 알림·음성이 두 번 나고 서버 폴링도 두 배가 됐다. 나중에 뜬 쪽은 곧바로 물러나고
+// 먼저 떠 있던 창을 앞으로 불러온다(자동 실행이든 수동 실행이든 «먼저 뜬 쪽»이 남는다).
+// 스모크 검증(--smoke)은 설치본이 트레이에 떠 있어도 돌아야 하므로 잠금을 잡지 않는다.
+const gotLock = SMOKE ? true : app.requestSingleInstanceLock();
+if (!gotLock) {
+  quitting = true;
+  app.quit();
+} else {
+  // 창이 아직 없으면(자동 실행 직후 준비 중) showAndFocus가 알아서 넘어간다
+  app.on('second-instance', () => showAndFocus());
 }
 
 function notifyNewCall(call) {
@@ -140,15 +167,17 @@ async function refreshBoard() {
   if (quitting) return;
   const s = cfg();
   if (!store.isConfigured()) return;
-  const board = await api.getBoard(s.webAppUrl, s.grade, s.classNum);
-  if (quitting) return;   // 응답을 기다리는 사이에 종료가 시작됐을 수 있다
-  if (board.ok && board.data && typeof board.data.autoDismiss === 'number') {
-    autoDismissSec = board.data.autoDismiss;
-  }
-  if (board.ok) lastBoard = board.data;
-  if (board.ok && alive()) {
-    win.webContents.send('yc:board', { board: board.data });
-  }
+  const gen = pollGen;
+  const { grade, classNum } = classOf(s);
+  const board = await api.getBoard(s.webAppUrl, grade, classNum);
+  if (quitting || gen !== pollGen) return;   // 기다리는 사이 종료·재시작(주소·반 변경)이 있었으면 옛 응답은 버린다
+  if (!board.ok || !board.data || typeof board.data !== 'object' || Array.isArray(board.data)) return;
+  if (typeof board.data.autoDismiss === 'number') autoDismissSec = board.data.autoDismiss;
+  lastBoard = board.data;
+  // 정상 시정은 기억해 둔다 — 다음에 켤 때 board보다 시간표가 먼저 그려져도 이 학교 시정을 쓴다
+  const pc = store.normPeriodConfig(board.data.periodConfig);
+  if (pc && JSON.stringify(pc) !== JSON.stringify(store.normPeriodConfig(s.periodConfig))) store.save({ periodConfig: pc });
+  if (alive()) win.webContents.send('yc:board', { board: board.data });
 }
 
 // ── (B) 급식/시간표 갱신 — getMeal + getTimetable(today/week). 드물게(MEAL_REFRESH_MS) 돈다. ──
@@ -159,15 +188,20 @@ async function refreshMeal() {
   if (!store.isConfigured()) return;
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
   const s = cfg();
+  const gen = pollGen;
+  const { grade, classNum } = classOf(s);
   const [meal, today, week] = await Promise.all([
     api.getMeal(s.webAppUrl),
-    api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'today'),
-    api.getTimetable(s.webAppUrl, s.grade, s.classNum, 'week')
+    api.getTimetable(s.webAppUrl, grade, classNum, 'today'),
+    api.getTimetable(s.webAppUrl, grade, classNum, 'week')
   ]);
-  if (quitting) return;   // 응답을 기다리는 사이에 종료가 시작됐을 수 있다
+  if (quitting || gen !== pollGen) return;   // 기다리는 사이 종료·재시작이 있었으면 옛 반의 응답은 버린다
+  // 오류 응답({ok:false,msg})이 JSON으로 오면 fetch는 성공이다 — 모양까지 맞아야 성공으로 친다
+  const todayOk = today.ok && Array.isArray(today.data);
+  const weekOk = week.ok && !!week.data && typeof week.data === 'object' && !Array.isArray(week.data);
   if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
-  if (today.ok) lastToday = today.data;
-  if (week.ok) lastWeek = week.data;
+  if (todayOk) lastToday = today.data;
+  if (weekOk) lastWeek = week.data;
   if (alive()) {
     win.webContents.send('yc:board', {
       meal: lastMeal,
@@ -175,7 +209,7 @@ async function refreshMeal() {
       weekTimetable: lastWeek
     });
   }
-  if (!meal.ok || !today.ok || !week.ok) {
+  if (!meal.ok || !todayOk || !weekOk) {
     if (mealRetryTimer) clearTimeout(mealRetryTimer);
     mealRetryTimer = setTimeout(refreshMeal, MEAL_RETRY_MS);
   }
@@ -184,58 +218,105 @@ async function refreshMeal() {
 // ── 호출 폴링 + 상태 머신 ──
 // 웹 학생화면(index.html)의 checkStudent/showStudentAlert/startCountdown과 동일한 동작을
 // 메인 프로세스 쪽 상태 머신으로 재구현한 것 — 렌더러가 숨겨져 있어도 정확히 돈다.
+
+// 호출 확인 — 예전엔 결과를 버려서, 통신이 한 번 끊기면 서버에 «미확인»으로 남은 호출이 화면을 붙잡았다.
+// 통신 실패(응답 없음·HTTP 오류)만 2·5·10초 뒤 최대 3번 다시 보낸다. 서버가 답을 했으면(ok든 ok:false든) 끝 —
+// ok:false(다른 반·범위 밖·이미 지워진 행)는 다시 보내도 같은 답이다. 기다리지 않고 화면은 곧바로 넘긴다.
+function confirmWithRetry(webAppUrl, row, grade, classNum, attempt) {
+  attempt = attempt || 0;
+  return Promise.resolve(api.confirmCall(webAppUrl, row, grade, classNum)).then(res => {
+    if (quitting || (res && res.ok)) return res;
+    if (attempt >= CONFIRM_RETRY_MS.length) {
+      logError('confirm', 'row ' + row + ' 확인 실패(재시도 ' + attempt + '번): ' + (res && res.error));
+      return res;
+    }
+    const t = setTimeout(() => {
+      confirmRetryTimers.delete(t);
+      confirmWithRetry(webAppUrl, row, grade, classNum, attempt + 1);
+    }, CONFIRM_RETRY_MS[attempt]);
+    confirmRetryTimers.add(t);
+    return res;
+  });
+}
+
 async function tick() {
   if (quitting) return;
   const s = cfg();
   if (!store.isConfigured()) return;
+  const gen = pollGen;
+  const { grade, classNum } = classOf(s);
 
   // 현재 표시 중인 호출의 카운트다운이 끝났으면 확인 처리 후 다음으로 넘어간다
+  let dismissed = false;
   if (current && Date.now() >= current.deadlineAt) {
-    api.confirmCall(s.webAppUrl, current.row); // 결과를 기다릴 필요 없음(실패해도 다음 폴링이 재시도하지 않도록 이미 화면은 넘어감)
+    confirmWithRetry(s.webAppUrl, current.row, grade, classNum);   // 기다리지 않는다(재시도는 뒤에서 따로)
     current = null;
+    dismissed = true;
   }
 
-  const res = await api.getCalls(s.webAppUrl, s.grade, s.classNum);
-  if (quitting) return;   // 응답을 기다리는 사이에 종료가 시작됐을 수 있다
-  if (!res.ok) return; // 네트워크 오류 — 다음 폴링에서 재시도, 화면 상태는 그대로 둔다
+  const res = await api.getCalls(s.webAppUrl, grade, classNum);
+  if (quitting || gen !== pollGen) return;   // 기다리는 사이 종료·재시작이 있었으면 옛 반의 목록은 버린다
+  if (!res.ok || !Array.isArray(res.data)) {
+    // 네트워크 오류 — 다음 폴링에서 재시도. 단 방금 카운트다운이 끝났으면 «0초» 알림에 멈춰 있지 않게 대기화면으로.
+    if (dismissed && alive()) win.webContents.send('yc:standby');
+    return;
+  }
 
-  const calls = res.data || [];
-  const pending = calls.filter(c => !(current && current.row === c.row));
+  const calls = res.data;
+  // 아직 한 번도 띄우지 않은 호출만 «대기»로 센다 — 확인이 안 돼 서버에 남은 지난 호출까지 세면 «+ 대기 1건»이 거짓으로 뜬다
+  const waiting = () => calls.filter(c => c && !alertedRows.has(c.row)).length;
 
   if (!current) {
-    const fresh = calls.find(c => !alertedRows.has(c.row));
+    const fresh = calls.find(c => c && !alertedRows.has(c.row));
     if (fresh) {
       alertedRows.add(fresh.row);
       current = Object.assign({}, fresh, { deadlineAt: Date.now() + autoDismissSec * 1000, totalSec: autoDismissSec });
-      const queueCount = calls.filter(c => c.row !== fresh.row).length;
-      if (alive()) win.webContents.send('yc:alert', { call: current, queueCount });
+      if (alive()) win.webContents.send('yc:alert', { call: current, queueCount: waiting() });
 
       if (s.autoRestoreOnCall) showAndFocus();
       else notifyNewCall(fresh);
       return;
     }
-    if (calls.length === 0 && alive()) {
-      win.webContents.send('yc:standby');
-    }
+    // 보여 줄 호출이 없으면 대기화면. 예전엔 목록이 «비어야»만 돌아가서, 확인이 실패해 서버에 남은
+    // 이미 알린 호출 하나가 새 호출도 아니고 빈 목록도 아니게 되어 알림 화면에 그대로 멈췄다.
+    if (alive()) win.webContents.send('yc:standby');
     return;
   }
 
   // 이미 표시 중인 호출이 있으면 대기열 숫자만 갱신
-  const queueCount = calls.filter(c => c.row !== current.row).length;
-  if (alive()) win.webContents.send('yc:alert', { call: current, queueCount });
+  if (alive()) win.webContents.send('yc:alert', { call: current, queueCount: waiting() });
 }
 
 async function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  if (boardTimer) clearInterval(boardTimer);
-  if (mealTimer) clearInterval(mealTimer);
-  if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
-  refreshMeal(); // 급식/시간표도 시작 즉시 1회 로드 — 설치 직후 30분 기다리지 않게
-  await refreshBoard(); // autoDismissSec을 먼저 채워야 첫 알림부터 정확한 카운트다운을 쓴다
+  stopAllTimers();          // 세대도 여기서 오른다 — 앞서 불려 응답을 기다리던 startPolling은 돌아와서 물러난다
+  const gen = pollGen;
+  if (quitting || !store.isConfigured()) return;   // 설정이 끝나면 yc:save-settings가 다시 부른다
+  await refreshBoard();     // 시정(periodConfig)·autoDismissSec을 먼저 채워야 시간표 칸과 첫 알림 카운트다운이 맞는다
+  if (gen !== pollGen || quitting) return;
+  refreshMeal();            // 그다음 급식/시간표 — 기다리지 않는다(NEIS가 느려도 호출 감지는 바로 시작)
   await tick();
+  if (gen !== pollGen || quitting) return;
   pollTimer = setInterval(tick, POLL_MS);
   boardTimer = setInterval(refreshBoard, BOARD_REFRESH_MS);
   mealTimer = setInterval(refreshMeal, MEAL_REFRESH_MS);
+}
+
+// 켤 때 store를 정리한다 — 예전 판이 저장한 교사용 주소(role·k)와 «3학년»·«２» 같은 학년·반.
+// 고칠 수 있으면 고쳐 다시 저장하고, 못 고치면 값은 그대로 두되 isConfigured()가 미설정으로 봐 설정 화면이 뜬다.
+function sanitizeStoredSettings() {
+  const s = cfg();
+  const patch = {};
+  if (s.webAppUrl) {
+    const clean = api.cleanWebAppUrl(s.webAppUrl);
+    if (clean !== s.webAppUrl) patch.webAppUrl = clean;
+  }
+  ['grade', 'classNum'].forEach(key => {
+    const raw = s[key];
+    if (raw === '' || raw == null) return;
+    const n = store.normClassNo(raw);
+    if (n && n !== raw) patch[key] = n;
+  });
+  if (Object.keys(patch).length) store.save(patch);
 }
 
 // ── IPC ──
@@ -251,21 +332,48 @@ function registerIpc() {
     weekTimetable: lastWeek
   }));
   ipcMain.handle('yc:save-settings', (e, patch) => {
+    patch = Object.assign({}, patch);
+    if ('webAppUrl' in patch) patch.webAppUrl = api.cleanWebAppUrl(patch.webAppUrl);   // role·k는 기기에 남기지 않는다
+    for (const key of ['grade', 'classNum']) {
+      if (!(key in patch)) continue;
+      const n = store.normClassNo(patch[key]);
+      if (!n) return { ok: false, error: CLASS_NO_MSG };   // 설정 화면이 먼저 막지만, 숫자가 아닌 학년·반은 저장 자체를 하지 않는다
+      patch[key] = n;
+    }
+    const before = cfg();
+    const prev = { webAppUrl: before.webAppUrl, grade: String(before.grade), classNum: String(before.classNum) };
     const next = store.save(patch);
     if (typeof patch.autoLaunch === 'boolean') applyAutoLaunch(patch.autoLaunch);
     refreshTrayMenu();
-    startPolling(); // URL/반이 바뀌었을 수 있으니 즉시 재시작
+    // 폴링은 주소·학년·반이 «바뀌었을 때만» 다시 시작한다. 소리·볼륨 저장(슬라이더를 끌 때마다 온다)까지
+    // 재시작하면 매번 서버를 세 번씩 다시 부르고, 예전엔 타이머까지 쌓였다.
+    const urlChanged = next.webAppUrl !== prev.webAppUrl;
+    if (urlChanged || String(next.grade) !== prev.grade || String(next.classNum) !== prev.classNum) {
+      // 옛 반의 표시 중 호출·시간표·공지는 새 반 화면에 섞이지 않게 비운다(설정 화면은 저장 뒤 새로고침한다)
+      current = null;
+      lastBoard = null; lastToday = null; lastWeek = null;
+      if (urlChanged) lastMeal = [];
+      startPolling();
+    }
     return next;
   });
   ipcMain.handle('yc:get-tts', (e, text) => api.getTts(cfg().webAppUrl, text));
   ipcMain.handle('yc:test-connection', async (e, { webAppUrl, grade, classNum }) => {
+    const url = api.cleanWebAppUrl(webAppUrl);
+    const g = store.normClassNo(grade), c = store.normClassNo(classNum);
+    if (!g || !c) return { ok: false, error: CLASS_NO_MSG };
     // GAS가 한동안 안 쓰이다 깨어나는 순간엔 응답이 8초를 넘겨 정상 URL도 "연결 실패"로 뜨던 문제 —
     // 확인 단계만 30초 제한 + 최대 3회 재시도. 첫 시도가 서버를 깨워놔서 재시도는 대부분 바로 붙는다.
     let test = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      test = await api.getBoard(webAppUrl, grade, classNum, 30000);
+      test = await api.getBoard(url, g, c, 30000);
       if (test.ok) break;
     }
+    if (!test.ok) return test;
+    // board만 보면 호출을 받아 올 길이 막혀 있어도 통과한다 — 실제로 호출 목록(calls)이 «배열»로 오는지까지 본다
+    const calls = await api.getCalls(url, g, c, 30000);
+    if (!calls.ok) return calls;
+    if (!Array.isArray(calls.data)) return { ok: false, error: '호출 목록 응답이 올바르지 않습니다' };
     return test;
   });
   ipcMain.handle('yc:quit', () => { quitting = true; app.quit(); });
@@ -308,6 +416,8 @@ async function runSmoke() {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null); // File/Edit/View/Window/Help 기본 메뉴 제거 — 전자칠판 화면에 불필요
   if (SMOKE) { runSmoke(); return; }
+  if (!gotLock) return;   // 먼저 떠 있는 유콜 데스크가 있다 — 창·트레이·폴링을 만들지 않고 물러난다
+  sanitizeStoredSettings();   // 창이 설정을 읽기 전에 옛 주소(role·k)·학년반 표기를 정리한다
   registerIpc();
   createWindow();
   createTray();
@@ -333,7 +443,8 @@ app.on('window-all-closed', e => { if (SMOKE || quitting) app.quit(); else e.pre
 app.on('before-quit', () => {
   quitting = true;
   stopAllTimers();
-  store.flushSync();
+  // 잠금을 못 잡고 물러나는 두 번째 인스턴스는 store를 쓰지 않는다 — 먼저 떠 있는 쪽이 방금 저장한 값을 옛 값으로 덮을 수 있다
+  if (gotLock) store.flushSync();
 });
 
 // 윈도우 종료·재시작·로그오프.

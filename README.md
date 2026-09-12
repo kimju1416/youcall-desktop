@@ -5,7 +5,7 @@
 
 > 💡 **설치는 선택 사항입니다.** 지금처럼 브라우저로 접속해서 쓰셔도 모든 기능이 똑같이 동작합니다.
 > 💡 전자칠판 **자체가 안드로이드**라면(전원을 켜면 앱 아이콘 화면이 뜬다면) 이 exe는 설치되지 않습니다.
-> 대신 [유콜 보드(Android APK)](https://github.com/kimju1416/youcall-board/releases/latest)를 쓰세요.
+> 대신 [유콜 보드 (호환) Android APK](https://github.com/kimju1416/youcall-board-compat/releases/latest)를 쓰세요.
 
 ## 다운로드
 

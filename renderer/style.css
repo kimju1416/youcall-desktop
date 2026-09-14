@@ -217,6 +217,9 @@ table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px
 .cfg-toggle-row { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 700; padding: 4px 0; }
 .cfg-save-btn { padding: 14px; background: var(--blue); color: #fff; border: none; border-radius: var(--r-lg); font-size: 15px; font-weight: 900; font-family: inherit; cursor: pointer; box-shadow: 4px 4px 12px var(--blue-d); margin-top: 6px; }
 .cfg-save-btn:active { transform: scale(.98); }
+/* 이미 설정된 뒤 ⚙️로 연 경우에만 보인다(최초 설정에는 숨김 — app.js openCfgModal) */
+.cfg-close-btn { padding: 11px; background: transparent; color: var(--text2); border: 1px solid var(--border); border-radius: var(--r-lg); font-size: 14px; font-weight: 700; font-family: inherit; cursor: pointer; }
+.cfg-close-btn:active { transform: scale(.98); }
 .cfg-status { font-size: 12px; text-align: center; min-height: 16px; }
 .cfg-status.err { color: #c0392b; }
 .cfg-status.ok  { color: #2f8f5b; }

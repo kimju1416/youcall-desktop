@@ -45,6 +45,9 @@ function speakAsync(text, myToken) {
     window.yc.getTts(text).then(function (res) {
       if (myToken !== _ttsToken) { resolve(); return; }
       if (!res.ok || !res.data || !res.data.audio) { setTtsStatus('⚠️ 음성 준비 실패'); resolve(); return; }
+      // 서버는 음성을 못 만들면 audio에 «ERROR:…»를 담아 준다(웹 칠판 index.html과 같게 거른다).
+      // 예전엔 그걸 atob에 넣어 «⚠️ 오류: Failed to execute 'atob'…» 영어 문구가 떴다.
+      if (String(res.data.audio).indexOf('ERROR:') === 0) { setTtsStatus('⚠️ 음성 준비 실패'); resolve(); return; }
       try {
         var b64 = res.data.audio;
         var binary = atob(b64), buf = new ArrayBuffer(binary.length), view = new Uint8Array(buf);
@@ -342,9 +345,28 @@ function renderAgenda(agenda) {
     row.appendChild(at); row.appendChild(ad); el.appendChild(row);
   });
 }
+/* 공지(board)를 한 번도 못 받았을 때 학급 메모 칸 — 예전엔 안내 없이 빈 칸으로 남았다.
+   한 번이라도 받았으면(그 뒤 실패는 main이 알리지 않는다) 받은 내용을 그대로 둔다. */
+var MEMO_FAIL_TEXT = '학급 메모를 불러오지 못했어요 — 잠시 뒤 다시 받아요';
+var _boardShown = false;
+function renderMemoFail() {
+  if (_boardShown) return;
+  var el = document.getElementById('classMemoText'); if (!el) return;
+  el.textContent = MEMO_FAIL_TEXT;
+  el.classList.add('empty');
+}
+/* 급식 — 배열이 아니면(한 번도 못 받음 null·모양이 틀린 값) «못 받음». 전에 받은 게 있으면 그걸 다시 그리고,
+   없으면 «불러오지 못했어요». 예전엔 못 받은 날도 «오늘은 급식이 없어요»로 보였다(시간표 null 처리와 같은 결). */
+var MEAL_FAIL_TEXT = '급식을 불러오지 못했어요 — 잠시 뒤 다시 받아요';
+var _lastMealList = null;
 function renderMeal(meals) {
   var el = document.getElementById('mealList'); if (!el) return;
-  if (!meals || !meals.length) { el.innerHTML = '<div class="meal-empty">오늘은 급식이 없어요</div>'; return; }
+  if (!Array.isArray(meals)) {
+    if (!_lastMealList) { el.className = ''; el.innerHTML = '<div class="meal-empty">' + MEAL_FAIL_TEXT + '</div>'; return; }
+    meals = _lastMealList;
+  }
+  _lastMealList = meals;
+  if (!meals.length) { el.innerHTML = '<div class="meal-empty">오늘은 급식이 없어요</div>'; return; }
   el.innerHTML = '';
   el.className = (meals.length > 1) ? 'multi' : '';
   var typeIcon = { '조식': '🌅', '중식': '🍚', '석식': '🌙' };
@@ -557,6 +579,9 @@ function showAlert(payload) {
   // 새 호출이면(직전에 보여주던 것과 다른 row) 소리+음성 재생을 시작한다
   if (_lastAlertRow !== call.row) {
     _lastAlertRow = call.row;
+    // ⚙️ 설정 창이 열려 있으면 닫는다 — 설정 창이 호출 화면을 덮어 누구를 부르는지 안 보였다(입력하던 값은 버린다).
+    // 같은 호출의 대기 건수 갱신(3초마다)에서는 닫지 않는다 — 호출 화면을 본 뒤 일부러 ⚙️를 연 경우는 그대로 둔다.
+    closeCfgModal(true);
     playAlertNTimes(call.name + ' 학생 교무실로 오세요', getRepeatCount());
   }
 
@@ -591,8 +616,14 @@ function normClassNo(v) {
   var n = Number(s);
   return n >= 1 ? String(n) : '';
 }
+/* 설정 창 — 예전엔 닫는 길이 «저장하고 시작하기»뿐이었고 설정 창(z-index 9999)이 호출 화면(20)을 덮어,
+   칠판에서 ⚙️를 잘못 누르면 호출이 와도 소리만 나고 누구를 부르는지 안 보였다.
+   · 이미 설정된 뒤 ⚙️로 연 경우에만 «닫기» 버튼·Esc로 닫는다 — 최초 설정(설정 전)에는 닫기가 없다
+   · 새 호출이 오면 설정 창을 닫고 호출 화면을 보인다(showAlert) — 입력하던 값은 버린다(다음에 열 때 저장값으로 다시 채운다) */
+var _cfgClosable = false;
 function openCfgModal() {
   var s = SETTINGS || {};
+  _cfgClosable = !!(s.webAppUrl && normClassNo(s.grade) && normClassNo(s.classNum));
   document.getElementById('cfgUrl').value = s.webAppUrl || '';
   document.getElementById('cfgGrade').value = s.grade || '';
   document.getElementById('cfgClass').value = s.classNum || '';
@@ -600,10 +631,32 @@ function openCfgModal() {
   document.getElementById('cfgAutoRestore').checked = s.autoRestoreOnCall !== false;
   document.getElementById('cfgAutoLaunch').checked = s.autoLaunch !== false;
   document.getElementById('cfgStatus').textContent = '';
+  var closeBtn = document.getElementById('cfgCloseBtn');
+  if (closeBtn) closeBtn.style.display = _cfgClosable ? '' : 'none';
   document.getElementById('cfgModal').classList.add('show');
+}
+/* 저장 순번 — 설정 창이 닫힐 때마다(새 호출·Esc·닫기) 올린다. 저장 처리기는 연결 확인·저장을 기다렸다 돌아와
+   순번이 바뀌었으면 아무것도 저장하지 않고 새로고침도 하지 않는다.
+   예전엔 창이 닫혀도 저장·새로고침이 이어져, 확인 실패 문구는 숨은 창에 써지고 성공이면 600ms 뒤 새로고침이 떠 있는 호출 화면을 날렸다
+   (주소·반을 안 바꾼 저장이면 다음 알림에서 소리·음성이 처음부터 다시, 바꾼 저장이면 호출이 확인 없이 사라졌다). */
+var _cfgSaveSeq = 0;
+// force = 호출이 와서 닫는 경우(최초 설정이어도 닫는다 — main은 설정이 끝나야 호출을 보내므로 저장 직후뿐이다)
+function closeCfgModal(force) {
+  if (!force && !_cfgClosable) return false;
+  var m = document.getElementById('cfgModal');
+  if (!m || !m.classList.contains('show')) return false;
+  m.classList.remove('show');
+  _cfgSaveSeq++;   // 기다리던 저장이 있으면 돌아와서 물러난다
+  return true;
+}
+function handleCfgKey(e) {
+  if (e && (e.key === 'Escape' || e.key === 'Esc')) closeCfgModal(false);
 }
 function wireCfgModal() {
   document.getElementById('openCfgBtn').addEventListener('click', openCfgModal);
+  var closeBtn = document.getElementById('cfgCloseBtn');
+  if (closeBtn) closeBtn.addEventListener('click', function () { closeCfgModal(false); });
+  document.addEventListener('keydown', handleCfgKey);
   document.getElementById('cfgSaveBtn').addEventListener('click', async function () {
     var url = document.getElementById('cfgUrl').value.trim();
     var gradeRaw = document.getElementById('cfgGrade').value.trim();
@@ -615,8 +668,11 @@ function wireCfgModal() {
     document.getElementById('cfgGrade').value = grade;   // «3학년»을 넣었으면 «3»으로 고친 모양을 보여 준다
     document.getElementById('cfgClass').value = classNum;
 
+    var mySeq = _cfgSaveSeq;   // 기다리는 사이 설정 창이 닫히면(새 호출·Esc·닫기) 바뀐다
     statusEl.textContent = '연결 확인 중...'; statusEl.className = 'cfg-status';
     var test = await window.yc.testConnection(url, grade, classNum);
+    // 창이 닫혔다 — 아무것도 저장하지 않고 새로고침도 하지 않는다(떠 있는 호출 화면·확인 흐름은 그대로 둔다)
+    if (mySeq !== _cfgSaveSeq) return;
     if (!test.ok) {
       statusEl.textContent = '연결 실패: ' + test.error + ' (URL을 다시 확인하세요)';
       statusEl.className = 'cfg-status err';
@@ -630,12 +686,51 @@ function wireCfgModal() {
       autoRestoreOnCall: document.getElementById('cfgAutoRestore').checked,
       autoLaunch: document.getElementById('cfgAutoLaunch').checked
     });
+    // 저장 IPC를 기다리는 아주 짧은 사이에 닫혔으면 저장은 이미 끝났다 — 떠 있는 호출 화면을 날리지 않게 새로고침만 하지 않는다
+    if (mySeq !== _cfgSaveSeq) { if (saved && saved.ok !== false) SETTINGS = saved; return; }
     if (saved && saved.ok === false) { statusEl.textContent = saved.error || '저장하지 못했습니다'; statusEl.className = 'cfg-status err'; return; }
     if (_savePrefTimer) flushPref();   // 방금 끈 볼륨이 새로고침에 묻히지 않게
     statusEl.textContent = '저장 완료! 시작합니다...';
     statusEl.className = 'cfg-status ok';
     setTimeout(function () { location.reload(); }, 600);
   });
+}
+
+/* ===== main이 보내 준 공지·급식·시간표 그리기 =====
+   공지 경로는 {board} 또는 {boardFailed}만, 급식/시간표 경로는 {meal,todayTimetable,weekTimetable}만 나눠 온다.
+   받은 필드만 다시 그리고, 안 온(undefined) 필드는 기존 화면을 그대로 둔다.
+   null(물었는데 한 번도 못 받음)은 각 render가 «불러오지 못했어요»로, []·{}(받았는데 비었음)는 «없음»으로 그린다. */
+function applyBoardData(data) {
+  if (!data) return;
+  if (data.board) {
+    _boardShown = true;
+    document.documentElement.setAttribute('data-theme', String(data.board.theme || 1));
+    document.getElementById('sBadge').textContent = (data.board.schoolName ? data.board.schoolName + ' ' : '') + SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
+    renderNotice(data.board.notice, data.board.noticeStep);
+    renderClassMemo(data.board.classMemo, data.board.memoStep);
+    renderAgenda(data.board.agenda);
+    applyPeriodConfig(data.board.periodConfig);   // 모양 검사 후 바뀌었으면 시정표 재계산 + 오늘·주간 다시 그리기
+  } else if (data.boardFailed) {
+    renderMemoFail();   // 공지를 한 번도 못 받았다 — 학급 메모 칸을 안내 없이 비워 두지 않는다
+  }
+  if (data.meal !== undefined) renderMeal(data.meal);
+  if (data.todayTimetable !== undefined) renderPeriodRow(data.todayTimetable);
+  if (data.weekTimetable !== undefined) renderWeek(data.weekTimetable);
+}
+/* 렌더러가 리스너를 달기 전에 main이 먼저 보낸 첫 결과는 유실된다 — 스냅샷으로 당겨 와 같은 규칙으로 그린다.
+   예전 스냅샷은 «받은 값»만 그려서 서버 오류 속에서 켜면 급식·시간표가 90초 동안 «불러오는 중...», 메모 칸은 빈 채였다.
+   main이 아직 묻는 중이면(…Tried가 false) 건드리지 않고 «불러오는 중...»을 둔다. */
+function applySnapshot(snap) {
+  if (!snap) return;
+  var d = {};
+  if (snap.board) d.board = snap.board;
+  else if (snap.boardTried) d.boardFailed = true;
+  // 급식은 학교(주소) 단위 — 학년·반만 바꿔도 main이 들고 있으니 배열이면 곧바로 그린다.
+  // 예전엔 반만 바꿔도 «물어봤음»이 꺼져 새로고침 뒤 급식이 «불러오는 중...»에 남았다.
+  if (snap.mealTried || Array.isArray(snap.meal)) d.meal = snap.meal;
+  // 시간표는 반마다 다르다 — 새 반 것을 다시 묻는 중(ttTried=false)이면 «못 받음»으로 그리지 않고 «불러오는 중...»을 둔다
+  if (snap.ttTried) { d.todayTimetable = snap.todayTimetable; d.weekTimetable = snap.weekTimetable; }
+  applyBoardData(d);
 }
 
 /* ===== 초기화 ===== */
@@ -673,39 +768,12 @@ window.addEventListener('DOMContentLoaded', async function () {
   // 공지 경로는 {board}만, 급식/시간표 경로는 {meal,todayTimetable,weekTimetable}만 나눠 보낸다.
   // 받은 필드만 다시 그리고, 안 온(undefined) 필드는 기존 화면을 그대로 둔다.
   // (빈 배열/빈 객체로 온 경우의 "없음" 표시는 각 render 함수가 유지 — undefined와는 구분된다.)
-  window.yc.onBoard(function (data) {
-    if (data.board) {
-      document.documentElement.setAttribute('data-theme', String(data.board.theme || 1));
-      document.getElementById('sBadge').textContent = (data.board.schoolName ? data.board.schoolName + ' ' : '') + SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
-      renderNotice(data.board.notice, data.board.noticeStep);
-      renderClassMemo(data.board.classMemo, data.board.memoStep);
-      renderAgenda(data.board.agenda);
-      applyPeriodConfig(data.board.periodConfig);   // 모양 검사 후 바뀌었으면 시정표 재계산 + 오늘·주간 다시 그리기
-    }
-    if (data.meal !== undefined) renderMeal(data.meal);
-    if (data.todayTimetable !== undefined) renderPeriodRow(data.todayTimetable);
-    if (data.weekTimetable !== undefined) renderWeek(data.weekTimetable);
-  });
+  window.yc.onBoard(applyBoardData);
 
-  // 리스너를 단 직후, 이미 받아둔 값이 있으면 즉시 그린다(첫 폴링 결과 유실 방지 — main의 캐시를 당겨온다)
+  // 리스너를 단 직후, main이 이미 받아 둔 값(또는 «물었는데 못 받음»)을 당겨 와 즉시 그린다 — 첫 결과가 리스너보다 먼저 와 유실되는 경쟁 방지
   if (window.yc.getSnapshot) {
-    try {
-      var snap = await window.yc.getSnapshot();
-      if (snap) {
-        if (snap.board) {
-          document.documentElement.setAttribute('data-theme', String(snap.board.theme || 1));
-          document.getElementById('sBadge').textContent = (snap.board.schoolName ? snap.board.schoolName + ' ' : '') + SETTINGS.grade + '학년 ' + SETTINGS.classNum + '반';
-          renderNotice(snap.board.notice, snap.board.noticeStep);
-          renderClassMemo(snap.board.classMemo, snap.board.memoStep);
-          renderAgenda(snap.board.agenda);
-          applyPeriodConfig(snap.board.periodConfig);
-        }
-        if (snap.meal && snap.meal.length) renderMeal(snap.meal);
-        // 시간표는 main이 한 번이라도 받았을 때만(null이 아니면) 그린다 — 받았는데 빈 것도 «오늘은 수업이 없어요»로 그려야 맞다
-        if (Array.isArray(snap.todayTimetable)) renderPeriodRow(snap.todayTimetable);
-        if (snap.weekTimetable && typeof snap.weekTimetable === 'object') renderWeek(snap.weekTimetable);
-      }
-    } catch (e) { /* 스냅샷이 없으면 다음 폴링을 기다린다 */ }
+    try { applySnapshot(await window.yc.getSnapshot()); }
+    catch (e) { /* 스냅샷이 없으면 다음 폴링을 기다린다 */ }
   }
 
   window.yc.onAlert(showAlert);

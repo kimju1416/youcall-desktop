@@ -720,6 +720,301 @@ const periods = n => Array.from({ length: n }, (_, i) => ({ period: i + 1, subje
     eq(r.run('toMinutes("09:00") === SCHEDULE[0].start'), true, '1교시 시작');
   });
 
+  /* ═════════ v1.2.2 — EXE 전수 점검(2026-09-14) 결함 회귀 ═════════
+     태그 v1.2.1 원문으로 돌리면(node tests/test-v120.js <v1.2.1 사본 폴더>) 아래 검사가 실패해야 한다
+     — «방어»라고 적은 검사만 옛 코드도 통과한다(바꾼 길이 옛 동작을 깨지 않았는지 본다). */
+  const CALL2 = (row, extra) => Object.assign({ row, teacher: '가상교사', grade: '3', classNum: '2', num: '7', name: '가상학생', message: '', time: '10:00', location: '' }, extra || {});
+  const alertRows = m => m.ev.sent.filter(s => s[0] === 'yc:alert').map(s => s[1].call.row);
+
+  await check('v1.2.2 알린 호출 기억 — 주소(새 시트 사본)·학년이 바뀌면 같은 행 번호의 새 호출이 뜬다(기억 열쇠가 다르다)', async () => {
+    let list = [CALL2(2)];
+    const m = loadMain({ api: { getCalls: () => ({ ok: true, data: list }) } });
+    m.ctx.createWindow(); m.ctx.registerIpc();
+    await m.ctx.tick();
+    eq(alertRows(m), [2], '첫 알림');
+    m.advance(31000); list = []; await m.ctx.tick(); await flush();
+    await m.ev.ipc['yc:save-settings']({}, { webAppUrl: 'https://script.google.com/macros/s/NEWCOPY/exec' });
+    await flush(12);
+    m.ev.sent.length = 0; list = [CALL2(2)];
+    m.advance(3000); await m.ctx.tick();
+    eq(alertRows(m), [2], '주소(새 시트 사본) 변경 뒤 새 시트 2행 호출');
+    m.advance(31000); list = []; await m.ctx.tick(); await flush();
+    await m.ev.ipc['yc:save-settings']({}, { grade: '4' });
+    await flush(12);
+    m.ev.sent.length = 0; list = [CALL2(2, { grade: '4' })];
+    m.advance(3000); await m.ctx.tick();
+    eq(alertRows(m), [2], '학년 변경 뒤 같은 행 번호');
+  });
+  await check('v1.2.2 알린 호출 기억 — 24시간 안엔 같은 행을 다시 알리지 않고, 지나면 버린다', async () => {
+    const m = loadMain({ api: { getCalls: () => ({ ok: true, data: [CALL2(7)] }) } });
+    m.ctx.createWindow();
+    await m.ctx.tick();
+    m.advance(31000); await m.ctx.tick(); await flush();   // 카운트다운 끝 — 서버에 남아 있다고 치자
+    m.ev.sent.length = 0;
+    m.advance(60 * 60 * 1000); await m.ctx.tick();
+    eq(alertRows(m), [], '1시간 뒤 같은 행(서버에 남은 지난 호출)');
+    m.advance(24 * 60 * 60 * 1000); await m.ctx.tick();
+    eq(alertRows(m), [7], '24시간이 지난 뒤 같은 행 번호');
+  });
+  await check('v1.2.2 호출 목록 — 앞 요청이 안 끝났으면 겹쳐 보내지 않는다', async () => {
+    const pend = [];
+    const m = loadMain({ api: { getCalls: () => { const d = deferred(); pend.push(d); return d.p; } } });
+    m.ctx.createWindow();
+    m.ctx.tick(); await flush();                                  // 옛 코드는 응답을 영영 기다리므로 await하지 않는다
+    for (let i = 0; i < 3; i++) { m.advance(3000); m.ctx.tick(); await flush(); }
+    eq(m.calls.getCalls.length, 1, '느린 응답을 기다리는 동안 보낸 요청 수');
+    pend[0].resolve({ ok: true, data: [] }); await flush();
+    m.advance(3000); m.ctx.tick(); await flush();
+    eq(m.calls.getCalls.length, 2, '응답이 끝난 뒤 다음 박자');
+  });
+  await check('v1.2.2 호출 목록 — 실패(HTTP 오류·배열 아닌 답)가 이어지면 6·12·15초로 물러나고, 성공하면 곧바로 3초', async () => {
+    let mode = 'http';
+    const m = loadMain({ api: { getCalls: () => mode === 'http' ? { ok: false, error: 'HTTP 500' } : (mode === 'obj' ? { ok: true, data: { ok: false, msg: 'x' } } : { ok: true, data: [] }) } });
+    m.ctx.createWindow();
+    const times = []; let t = 0;
+    const step = async () => { const before = m.calls.getCalls.length; m.ctx.tick(); await flush(); if (m.calls.getCalls.length > before) times.push(t); m.advance(3000); t += 3000; };
+    for (let i = 0; i < 18; i++) { if (i === 4) mode = 'obj'; await step(); }   // 0~51초
+    mode = 'ok';
+    for (let i = 0; i < 6; i++) await step();                                     // 54~69초
+    const gaps = times.slice(1).map((x, i) => x - times[i]);
+    eq(gaps, [6000, 12000, 15000, 15000, 15000, 3000, 3000], '요청 간격(ms)');
+  });
+  await check('v1.2.2 호출 목록 — 물러날 시각은 응답이 끝난 때부터, 시계가 뒤로 가면 먼 예약을 지운다', async () => {
+    let d = null;
+    const m = loadMain({ api: { getCalls: () => { d = deferred(); return d.p; } } });
+    m.ctx.createWindow();
+    m.ctx.tick(); await flush();                                   // 0초에 보냄
+    m.advance(8000); d.resolve({ ok: false, error: 'This operation was aborted' }); await flush();   // 8초에 시간 초과로 끝남 → 14초까지 쉰다
+    const counts = [];
+    for (const gap of [1000, 3000, 3000]) { m.advance(gap); m.ctx.tick(); await flush(); counts.push(m.calls.getCalls.length); }   // 9·12·15초
+    d.resolve({ ok: false, error: 'HTTP 500' }); await flush();   // 15초 요청도 실패 → 27초까지 쉴 차례
+    m.advance(-60 * 60 * 1000);                                    // 시계가 1시간 뒤로
+    m.ctx.tick(); await flush();
+    eq(counts.concat([m.calls.getCalls.length]), [1, 1, 2, 3], '9·12·15초 요청 수 + 시계가 뒤로 간 뒤');
+  });
+  await check('v1.2.2 호출 목록(방어) — 카운트다운이 끝날 때 앞 요청이 걸려 있다가 실패로 끝나도 0초 화면에 멈추지 않는다', async () => {
+    let d = null;
+    const m = loadMain({ api: { getCalls: () => { d = deferred(); return d.p; } } });
+    m.ctx.createWindow();
+    m.ctx.tick(); await flush(); d.resolve({ ok: true, data: [CALL2(9)] }); await flush();
+    eq(m.lastSent()[0], 'yc:alert', '첫 알림');
+    m.advance(28000); m.ctx.tick(); await flush();
+    const first = d;
+    m.advance(3000); m.ctx.tick(); await flush();                   // 31초 — 카운트다운 끝
+    eq(m.calls.confirmCall.length, 1, '확인은 곧바로');
+    first.resolve({ ok: false, error: 'timeout' }); await flush();
+    if (d !== first) { d.resolve({ ok: false, error: 'timeout' }); await flush(); }
+    eq(m.lastSent()[0], 'yc:standby', '실패 응답 뒤 화면');
+  });
+  await check('v1.2.2 공지 — 한 번도 못 받았으면 30초마다 다시(받은 뒤엔 3분 주기만), 렌더러에 «못 받음»', async () => {
+    let boardUp = false;
+    const m = loadMain({ api: { getBoard: () => boardUp ? DEFAULT_API.getBoard() : ({ ok: false, error: 'HTTP 500' }) } });
+    m.ctx.createWindow(); m.ctx.registerIpc();
+    await m.ctx.refreshBoard(); await flush();
+    eq(m.timers.timeouts().map(x => x.ms), [30000], '첫 실패 뒤 예약');
+    ok(m.ev.sent.some(s => s[0] === 'yc:board' && s[1] && s[1].boardFailed === true), '렌더러에 «못 받음»을 보내지 않음');
+    eq(m.ev.ipc['yc:get-snapshot']().boardTried, true, '스냅샷 boardTried');
+    m.timers.runTimeouts(x => x.ms === 30000); await flush();
+    eq(m.calls.getBoard.length, 2, '30초 뒤 다시');
+    eq(m.timers.timeouts().map(x => x.ms), [30000], '또 실패 → 다시 예약');
+    boardUp = true;
+    m.timers.runTimeouts(x => x.ms === 30000); await flush();
+    eq([m.calls.getBoard.length, m.timers.timeouts().length], [3, 0], '받은 뒤 요청 수·30초 예약');
+    boardUp = false;
+    await m.ctx.refreshBoard(); await flush();
+    eq(m.timers.timeouts().length, 0, '받은 적이 있으면 실패해도 30초 예약 없음(3분 주기)');
+  });
+  await check('v1.2.2 급식 — 한 번도 못 받으면 null(«못 받음»), 스냅샷 mealTried, 배열이 아닌 답도 실패', async () => {
+    let meal = () => ({ ok: false, error: 'HTTP 500' });
+    const m = loadMain({ api: { getMeal: (...a) => meal(...a), getTimetable: (u, g, c, scope) => ({ ok: true, data: scope === 'week' ? {} : [] }) } });
+    m.ctx.createWindow(); m.ctx.registerIpc();
+    const s0 = m.ev.ipc['yc:get-snapshot']();
+    eq([s0.meal, s0.mealTried], [null, false], '묻기 전');
+    await m.ctx.refreshMeal();
+    const s1 = m.ev.ipc['yc:get-snapshot']();
+    eq([s1.meal, s1.mealTried], [null, true], '못 받음');
+    eq(m.ev.sent.filter(s => s[0] === 'yc:board').pop()[1].meal, null, '렌더러에 보낸 급식');
+    meal = () => ({ ok: true, data: { ok: false, msg: 'x' } });
+    await m.ctx.refreshMeal();
+    eq(m.ev.ipc['yc:get-snapshot']().meal, null, '배열이 아닌 답');
+    ok(m.timers.timeouts().some(x => x.ms === 90000), '배열이 아닌 답에 재시도 예약 없음');
+    meal = () => ({ ok: true, data: [] });
+    await m.ctx.refreshMeal();
+    eq(m.ev.ipc['yc:get-snapshot']().meal, [], '급식 없는 날');
+  });
+
+  // 렌더러 — 설정 창·호출 화면·음성·스냅샷까지 원문 함수를 이름으로 떼어 가짜 DOM에 올린다
+  const R122_FNS = ['renderMemoFail', 'applyBoardData', 'applySnapshot', 'renderNotice', 'renderClassMemo', 'renderAgenda',
+    'fitNoticeBar', 'fitClassMemo', 'fitScaledBox', 'fontScale', 'refitAll', 'weekCoversPanel', 'openCfgModal', 'closeCfgModal',
+    'handleCfgKey', 'showAlert', 'showStandby', 'playAlertNTimes', 'playSound', 'getAC', 'getVol', 'getTtsVol', 'getRepeatCount',
+    'speakAsync', 'setTtsStatus', '_stopCurrentTts', 'wait', 'fitAlertBox'];
+  function loadRenderer122() {
+    const src = read('renderer/js/app.js');
+    const parts = [extractTopVars(src)];
+    RENDERER_FNS.concat(R122_FNS).forEach(n => { const f = extractFunction(src, n); if (f) parts.push(f); });
+    const dom = makeDom();
+    const timers = makeTimers();
+    const decoded = [];
+    const node = () => ({ connect() {}, start() {}, stop() {} });
+    const param = () => ({ value: 1, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} });
+    class FakeAC {
+      constructor() { this.state = 'running'; this.currentTime = 0; this.destination = {}; }
+      resume() {} createBuffer() { return {}; } createBufferSource() { return node(); }
+      createGain() { return Object.assign(node(), { gain: param() }); }
+      createOscillator() { return Object.assign(node(), { frequency: param() }); }
+      decodeAudioData(buf) { decoded.push(buf); }
+    }
+    const win = { yc: { saveSettings: p => Promise.resolve(p), getTts: () => Promise.resolve({ ok: false }) }, addEventListener() {}, innerHeight: 800, AudioContext: FakeAC };
+    dom.document.documentElement = { setAttribute() {} };
+    dom.document.addEventListener = () => {};
+    dom.document.hidden = false;
+    const ctx = {
+      window: win, document: dom.document, console, atob,
+      setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout, setInterval: timers.setInterval, clearInterval: timers.clearInterval,
+      getComputedStyle: () => ({ paddingBottom: '0px', paddingTop: '0px', paddingLeft: '0px', paddingRight: '0px', lineHeight: '20px', fontSize: '16px' })
+    };
+    vm.createContext(ctx);
+    new vm.Script(parts.join('\n\n'), { filename: 'renderer/js/app.js(이름으로 뗀 원문·v1.2.2 검사)' }).runInContext(ctx);
+    ['periodRow', 'weekWrap', 'mealList', 'cfgModal', 'cfgUrl', 'cfgGrade', 'cfgClass', 'cfgShowStandby', 'cfgAutoRestore', 'cfgAutoLaunch',
+      'cfgStatus', 'cfgCloseBtn', 'sStandby', 'sAlert', 'sNum', 'sName', 'sMsg', 'sTeacher', 'sLocation', 'sQueue', 'sCountdown', 'sBar',
+      'ttsStatus', 'classMemoText', 'sBadge', 'noticeBar', 'noticeText', 'agendaList'].forEach(id => dom.add(id));
+    dom.add('soundSelect', { value: '3' }); dom.add('volSlider', { value: '5' }); dom.add('ttsVolSlider', { value: '10' }); dom.add('repeatSelect', { value: '1' });
+    vm.runInContext('SCHEDULE = buildSchedule(PERIOD_CONFIG); SETTINGS = { webAppUrl: "https://x.test/exec", grade: "3", classNum: "2", showStandby: true };', ctx);
+    return { ctx, dom, timers, decoded, win, run: code => vm.runInContext(code, ctx) };
+  }
+  const ALERT = (row, q) => ({ call: { row, num: '7', name: '가상학생', message: '', teacher: '', location: '', deadlineAt: Date.now() + 30000, totalSec: 30 }, queueCount: q || 0 });
+
+  await check('v1.2.2 설정 창 — 설정된 뒤 연 창은 «닫기»·Esc로 닫고, 최초 설정엔 닫기가 없다', () => {
+    const r = loadRenderer122();
+    const modal = r.dom.byId.cfgModal, btn = r.dom.byId.cfgCloseBtn;
+    need(r.ctx, 'openCfgModal')();
+    eq(btn.style.display, '', '설정된 뒤 닫기 버튼 표시');
+    need(r.ctx, 'handleCfgKey')({ key: 'Escape' });
+    eq(modal.classList.contains('show'), false, 'Esc 뒤에도 열림');
+    r.run('SETTINGS = null;');
+    r.ctx.openCfgModal();
+    eq(btn.style.display, 'none', '최초 설정의 닫기 버튼');
+    r.ctx.handleCfgKey({ key: 'Escape' });
+    need(r.ctx, 'closeCfgModal')(false);
+    eq(modal.classList.contains('show'), true, '최초 설정이 Esc·닫기로 닫힘');
+  });
+  await check('v1.2.2 설정 창 — 새 호출이 오면 설정 창을 닫고 호출 화면을 보인다', () => {
+    const r = loadRenderer122();
+    r.ctx.openCfgModal();
+    need(r.ctx, 'showAlert')(ALERT(11));
+    eq([r.dom.byId.cfgModal.classList.contains('show'), r.dom.byId.sAlert.style.display], [false, 'flex'], '설정 창 열림·호출 화면');
+    r.ctx.openCfgModal();
+    r.ctx.showAlert(ALERT(11, 1));   // 같은 호출의 대기 건수 갱신 — 일부러 연 설정 창은 그대로
+    eq(r.dom.byId.cfgModal.classList.contains('show'), true, '같은 호출 갱신에 닫힘');
+  });
+  await check('v1.2.2 음성 — 서버가 audio에 «ERROR:…»를 주면 atob에 넣지 않고 «⚠️ 음성 준비 실패»', async () => {
+    const r = loadRenderer122();
+    r.win.yc.getTts = () => Promise.resolve({ ok: true, data: { audio: 'ERROR:403 Forbidden' } });
+    await need(r.ctx, 'speakAsync')('가상학생 학생 교무실로 오세요', 0);
+    eq(r.dom.byId.ttsStatus.textContent, '⚠️ 음성 준비 실패', '음성 상태');
+    eq(r.decoded.length, 0, '디코딩 시도');
+    r.win.yc.getTts = () => Promise.resolve({ ok: true, data: { audio: 'AAAA' } });   // 정상 base64는 그대로 디코딩한다
+    r.ctx.speakAsync('가', 0); await flush();
+    eq(r.decoded.length, 1, '정상 음성 디코딩');
+  });
+  await check('v1.2.2 급식·스냅샷 — 못 받음(null)은 «불러오지 못했어요», 메모 칸 안내, 아직 묻는 중이면 그대로', () => {
+    const r = loadRenderer122();
+    need(r.ctx, 'renderMeal')(null);
+    ok(r.dom.byId.mealList.innerHTML.indexOf('급식을 불러오지 못했어요') >= 0, '못 받은 급식: ' + r.dom.byId.mealList.innerHTML);
+    r.ctx.renderMeal([{ type: '중식', dishes: ['쌀밥'], kcal: '700', allergy: [] }]);
+    r.ctx.renderMeal(null);
+    ok(r.dom.byId.mealList.innerHTML.indexOf('쌀밥') >= 0, '받은 뒤 실패에 직전 급식이 사라짐');
+    r.ctx.renderMeal([]);
+    ok(r.dom.byId.mealList.innerHTML.indexOf('오늘은 급식이 없어요') >= 0, '빈 배열');
+
+    const r2 = loadRenderer122();
+    r2.dom.byId.mealList.innerHTML = '불러오는 중...';
+    need(r2.ctx, 'applySnapshot')({ board: null, meal: null, todayTimetable: null, weekTimetable: null, boardTried: false, mealTried: false });
+    eq(r2.dom.byId.mealList.innerHTML, '불러오는 중...', '아직 묻는 중');
+    r2.ctx.applySnapshot({ board: null, meal: null, todayTimetable: null, weekTimetable: null, boardTried: true, mealTried: true, ttTried: true });
+    ok(r2.dom.byId.mealList.innerHTML.indexOf('급식을 불러오지 못했어요') >= 0, '스냅샷 급식');
+    ok(r2.dom.byId.periodRow.innerHTML.indexOf('불러오지 못했') >= 0, '스냅샷 오늘 시간표');
+    ok(r2.dom.byId.weekWrap.innerHTML.indexOf('불러오지 못했') >= 0, '스냅샷 주간 시간표');
+    ok(r2.dom.byId.classMemoText.textContent.indexOf('학급 메모를 불러오지 못했어요') >= 0, '메모 칸: ' + r2.dom.byId.classMemoText.textContent);
+    need(r2.ctx, 'applyBoardData')({ board: { classMemo: '리코더 챙겨오기', notice: '', agenda: [] } });
+    r2.ctx.applyBoardData({ boardFailed: true });
+    eq(r2.dom.byId.classMemoText.textContent, '리코더 챙겨오기', '받은 뒤 실패 알림에 메모가 지워짐');
+  });
+
+  /* ─── v1.2.2 독립 검수 3건 — 저장 순번·알린 기억 열쇠·학년반만 바꾼 뒤 급식 ───
+     고치기 전 1.2.2 사본으로 돌리면 아래 «검수» 검사가 실패해야 한다(«방어»라고 적은 확인만 옛 코드도 통과). */
+  await check('v1.2.2 검수 — 저장(연결 확인)을 기다리는 사이 새 호출·Esc로 창이 닫히면 저장·새로고침을 하지 않는다', async () => {
+    const run = async closeBy => {
+      const r = loadRenderer122();
+      vm.runInContext(extractFunction(read('renderer/js/app.js'), 'wireCfgModal'), r.ctx);
+      r.dom.add('openCfgBtn'); r.dom.add('cfgSaveBtn');   // wireCfgModal이 처리기를 다는 버튼
+      const handlers = {};
+      Object.keys(r.dom.byId).forEach(id => { r.dom.byId[id].addEventListener = (ev, fn) => { handlers[id + ':' + ev] = fn; }; });
+      r.dom.document.addEventListener = (ev, fn) => { handlers['doc:' + ev] = fn; };
+      const reloads = []; r.ctx.location = { reload: () => reloads.push(1) };
+      const tests = [], saves = [];
+      r.win.yc.testConnection = () => { const d = deferred(); tests.push(d); return d.p; };
+      r.win.yc.saveSettings = p => { saves.push(p); return Promise.resolve(Object.assign({}, p)); };
+      r.ctx.wireCfgModal();
+      r.ctx.openCfgModal();
+      r.dom.byId.cfgClass.value = '5';
+      const done = handlers['cfgSaveBtn:click']();
+      await flush();
+      if (tests.length !== 1) throw new Error('연결 확인 요청 수 ' + tests.length);
+      if (closeBy === 'alert') r.ctx.showAlert(ALERT(21));
+      else if (closeBy === 'esc') handlers['doc:keydown']({ key: 'Escape' });
+      tests[0].resolve({ ok: true });
+      await done; await flush();
+      r.timers.runTimeouts(); await flush();   // 600ms 뒤 새로고침 예약이 있었다면 여기서 돈다
+      return { saves: saves.length, reloads: reloads.length, modalOpen: r.dom.byId.cfgModal.classList.contains('show'), alert: r.dom.byId.sAlert.style.display };
+    };
+    const kept = await run(null);
+    eq([kept.saves, kept.reloads], [1, 1], '(방어) 창이 그대로면 저장·새로고침');
+    const byAlert = await run('alert');
+    eq([byAlert.saves, byAlert.reloads, byAlert.modalOpen, byAlert.alert], [0, 0, false, 'flex'], '새 호출로 닫힘 — 저장 수·새로고침 수·설정 창·호출 화면');
+    const byEsc = await run('esc');
+    eq([byEsc.saves, byEsc.reloads, byEsc.modalOpen], [0, 0, false], 'Esc로 닫힘 — 저장 수·새로고침 수·설정 창');
+  });
+  await check('v1.2.2 검수 — 반·주소를 바꿨다 되돌려도 확인 안 된 호출을 같은 날 다시 알리지 않는다(기억 열쇠 주소|학년|반|행)', async () => {
+    const URL0 = CONFIGURED.webAppUrl;
+    const m = loadMain({ api: {
+      getCalls: (u, g, c) => ({ ok: true, data: (u === URL0 && g === '3' && c === '2') ? [CALL2(5)] : [] }),
+      confirmCall: () => ({ ok: true, data: { ok: false, msg: '잠시 뒤 다시 확인하세요' } })
+    } });
+    m.ctx.createWindow(); m.ctx.registerIpc();
+    await m.ctx.tick();
+    eq(alertRows(m), [5], '첫 알림');
+    m.advance(31000); await m.ctx.tick(); await flush();   // 확인이 거절돼 서버에 미확인으로 남는다
+    const save = async p => { await m.ev.ipc['yc:save-settings']({}, p); await flush(12); m.advance(3000); await m.ctx.tick(); await flush(); };
+    m.ev.sent.length = 0;
+    await save({ classNum: '3' }); await save({ classNum: '2' });
+    eq(alertRows(m), [], '반 2→3→2 뒤');
+    await save({ webAppUrl: 'https://script.google.com/macros/s/OTHER/exec' }); await save({ webAppUrl: URL0 + '?role=teacher&k=SECRET#x' });
+    eq(alertRows(m), [], '주소 A→B→A(교사용 표기로 다시 넣음) 뒤');
+  });
+  await check('v1.2.2 검수 — 학년·반만 바꾸면 급식은 들고 있고(mealTried 유지) 시간표만 다시 묻는다, 주소가 바뀌면 급식도 비운다', async () => {
+    const MEAL = [{ type: '중식', dishes: ['쌀밥'], kcal: '700', allergy: [] }];
+    const m = loadMain({ api: { getMeal: () => ({ ok: true, data: MEAL }), getTimetable: (u, g, c, scope) => ({ ok: true, data: scope === 'week' ? {} : [] }) } });
+    m.ctx.createWindow(); m.ctx.registerIpc();
+    await m.ctx.refreshMeal();
+    m.ev.ipc['yc:save-settings']({}, { classNum: '3' });
+    const s1 = m.ev.ipc['yc:get-snapshot']();
+    eq([s1.meal, s1.mealTried, s1.ttTried, s1.todayTimetable], [MEAL, true, false, null], '반만 바꾼 직후 스냅샷(급식·mealTried·ttTried·오늘 시간표)');
+    await flush(12);
+    m.ev.ipc['yc:save-settings']({}, { webAppUrl: 'https://script.google.com/macros/s/OTHER/exec' });
+    const s2 = m.ev.ipc['yc:get-snapshot']();
+    eq([s2.meal, s2.mealTried], [null, false], '주소를 바꾼 직후 스냅샷(급식·mealTried)');
+  });
+  await check('v1.2.2 검수 — 스냅샷: 급식이 배열이면 곧바로 그리고, 시간표는 ttTried일 때만 그린다', () => {
+    const r = loadRenderer122();
+    const MEAL = [{ type: '중식', dishes: ['쌀밥'], kcal: '700', allergy: [] }];
+    r.dom.byId.periodRow.innerHTML = '불러오는 중...'; r.dom.byId.mealList.innerHTML = '불러오는 중...';
+    need(r.ctx, 'applySnapshot')({ board: null, boardTried: false, meal: MEAL, mealTried: false, ttTried: false, todayTimetable: null, weekTimetable: null });
+    ok(r.dom.byId.mealList.innerHTML.indexOf('쌀밥') >= 0, '배열 급식을 안 그림: ' + r.dom.byId.mealList.innerHTML);
+    r.ctx.applySnapshot({ board: null, boardTried: false, meal: MEAL, mealTried: true, ttTried: false, todayTimetable: null, weekTimetable: null });
+    eq(r.dom.byId.periodRow.innerHTML, '불러오는 중...', '새 반 시간표를 다시 묻는 중인데 «못 받음»으로 그림');
+  });
+
   console.log('');
   console.log('통과 ' + pass + ' / 실패 ' + fail + ' (총 ' + (pass + fail) + ')');
   if (fail) console.log('실패 목록: ' + failed.join(' | '));

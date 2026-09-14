@@ -14,6 +14,12 @@ const POLL_MS = 3000;          // 호출 감지 주기 — 여러 반 상시 폴
 const BOARD_REFRESH_MS = 3 * 60 * 1000;   // 공지/설정(getBoard) 재조회 주기 — NEIS 미사용·부하 미미, 긴급공지·학급메모 빠른 반영 위해 짧게 유지
 const MEAL_REFRESH_MS = 30 * 60 * 1000;   // 급식/시간표(NEIS) 재조회 주기 — 자주 바뀌지 않으므로 드물게
 const MEAL_RETRY_MS = 90 * 1000;          // 급식/시간표 중 하나라도 실패하면 30분 안 기다리고 빠르게 1회 재시도
+// 공지(board)를 한 번도 못 받았으면 3분을 기다리지 않고 30초마다 다시 묻는다 — 받은 뒤엔 원래 3분 주기만.
+// 예전엔 서버 오류 속에서 켜면 공지·학급 메모·학교명·자동 닫힘 시간이 3분 동안 비어 있었다.
+const BOARD_RETRY_MS = 30 * 1000;
+// 호출 목록 실패가 이어지면 3→6→12→15초로 물러났다가 성공하면 곧바로 3초 — 호환판 app.js pollDelayMs와 같은 규칙
+const POLL_MAX_MS = 15000;
+const ALERTED_TTL_MS = 24 * 60 * 60 * 1000;   // 이미 알린 호출(row) 기억을 들고 있는 시간
 
 let win = null;
 let tray = null;
@@ -22,6 +28,7 @@ let pollTimer = null;
 let boardTimer = null;
 let mealTimer = null;
 let mealRetryTimer = null;
+let boardRetryTimer = null;   // 공지를 한 번도 못 받았을 때의 30초 재시도 예약
 // 폴링 «세대» — startPolling·stopAllTimers가 부를 때마다 1씩 오른다.
 // 예전엔 startPolling이 await 뒤에 setInterval을 만들어, 응답을 기다리는 사이 또 불리면(볼륨 슬라이더를 끌 때마다
 // 설정 저장 → 재시작) 3초·3분·30분 타이머가 겹겹이 쌓였다. 기다렸다 돌아온 쪽은 세대가 바뀌었으면 아무것도 만들지 않는다.
@@ -31,16 +38,30 @@ const CONFIRM_RETRY_MS = [2000, 5000, 10000];
 const CLASS_NO_MSG = '학년·반은 숫자만 입력해 주세요 (예: 3, 2)';
 
 // ── 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다 ──
-let lastMeal = [];
+// 급식도 null(한 번도 못 받음)과 [](받았는데 급식 없는 날)을 가른다 — 예전엔 []로 시작해 못 받은 날이 «오늘은 급식이 없어요»로 보였다
+let lastMeal = null;
 // 시간표는 null(한 번도 못 받음)과 []·{}(받았는데 비었음)를 가른다 — 못 받은 걸 «오늘은 수업이 없어요»로 그리지 않게
 let lastToday = null;
 let lastWeek = null;
 let lastBoard = null;   // 렌더러가 준비되기 전에 도착한 board를 잃지 않도록 캐시해 둔다
+// 한 번이라도 물어 답(성공·실패)이 돌아왔는지 — 렌더러가 리스너를 달기 전에 첫 결과가 오면 스냅샷으로 당겨 가는데,
+// «아직 묻는 중»과 «물었는데 못 받음»을 갈라야 «불러오는 중...»에 머물지 않고 «불러오지 못했어요»를 그린다.
+let boardTried = false;
+let mealTried = false;   // 급식 — 주소(학교)가 바뀔 때만 다시 false
+let ttTried = false;     // 시간표 — 학년·반이 바뀌어도 다시 false(반마다 다르다)
 
 // ── 호출 상태 머신 ──
-let alertedRows = new Set();  // 이번 실행 동안 이미 알림을 시작한 row (재알림 방지)
+// 이번 실행 동안 알림을 시작한 row → 알린 시각(재알림 방지). 예전엔 row만 영구히 들고 있어서
+// 시트 사본을 새로 떠 주소를 바꾸거나 호출로그 행을 지운 뒤 같은 번호로 온 새 호출이 앱을 재시작할 때까지 조용히 묻혔다.
+// 24시간이 지난 기록은 버리고, 주소·학년·반이 바뀌면 통째로 비운다(호환판 YouCallService alertedAt·ALERTED_TTL_MS와 같은 생각).
+const alertedAt = new Map();
 let current = null;           // 지금 화면에 보여주고 있는 호출 { row, ..., deadlineAt }
 let autoDismissSec = 30;      // board 데이터로 갱신됨
+// 호출 목록 요청 겹침 방지·물러나기(호환판 app.js tick과 같은 규칙)
+let pollBusyGen = -1;         // 이 값이 지금 세대(pollGen)와 같으면 앞 요청이 아직 안 끝났다 — 재시작 뒤 옛 요청이 새 세대를 막지 않게 세대로 적는다
+let pollFails = 0;            // 연달아 실패한 수
+let pollNextAt = 0;           // 실패로 물러나 있을 때 다음에 물어도 되는 시각(0 = 바로)
+let pendingStandby = false;   // 카운트다운이 끝나 닫을 차례 — 다음 응답이 실패로 와도 «0초» 화면에 멈추지 않게 대기화면으로 보낸다
 
 function cfg() { return store.load(); }
 // 서버에 보낼 학년·반 — 저장값은 켤 때·저장할 때 이미 맞추지만, 스모크(--settings)처럼 우회한 값도 숫자로 보낸다
@@ -58,8 +79,11 @@ function stopAllTimers() {
   if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   if (mealTimer) { clearInterval(mealTimer); mealTimer = null; }
   if (mealRetryTimer) { clearTimeout(mealRetryTimer); mealRetryTimer = null; }
+  if (boardRetryTimer) { clearTimeout(boardRetryTimer); boardRetryTimer = null; }
   confirmRetryTimers.forEach(t => clearTimeout(t));
   confirmRetryTimers.clear();
+  // 물러나기는 세대마다 새로 센다 — 주소·반을 바꿨는데 옛 서버의 실패 때문에 새 반이 15초씩 기다리지 않게
+  pollFails = 0; pollNextAt = 0; pendingStandby = false;
 }
 
 function createWindow() {
@@ -167,11 +191,21 @@ async function refreshBoard() {
   if (quitting) return;
   const s = cfg();
   if (!store.isConfigured()) return;
+  if (boardRetryTimer) { clearTimeout(boardRetryTimer); boardRetryTimer = null; }   // 3분 주기가 먼저 돌면 30초 예약은 겹치지 않게 지운다
   const gen = pollGen;
   const { grade, classNum } = classOf(s);
   const board = await api.getBoard(s.webAppUrl, grade, classNum);
   if (quitting || gen !== pollGen) return;   // 기다리는 사이 종료·재시작(주소·반 변경)이 있었으면 옛 응답은 버린다
-  if (!board.ok || !board.data || typeof board.data !== 'object' || Array.isArray(board.data)) return;
+  boardTried = true;
+  if (!board.ok || !board.data || typeof board.data !== 'object' || Array.isArray(board.data)) {
+    // 한 번도 못 받았으면: 렌더러에 «못 받음»을 알리고(학급 메모 칸 안내) 30초 뒤 다시 — 받을 때까지.
+    // 받은 적이 있으면 기존 화면을 그대로 두고 3분 주기를 기다린다.
+    if (!lastBoard) {
+      if (alive()) win.webContents.send('yc:board', { boardFailed: true });
+      if (!boardRetryTimer) boardRetryTimer = setTimeout(() => { boardRetryTimer = null; refreshBoard(); }, BOARD_RETRY_MS);
+    }
+    return;
+  }
   if (typeof board.data.autoDismiss === 'number') autoDismissSec = board.data.autoDismiss;
   lastBoard = board.data;
   // 정상 시정은 기억해 둔다 — 다음에 켤 때 board보다 시간표가 먼저 그려져도 이 학교 시정을 쓴다
@@ -196,10 +230,12 @@ async function refreshMeal() {
     api.getTimetable(s.webAppUrl, grade, classNum, 'week')
   ]);
   if (quitting || gen !== pollGen) return;   // 기다리는 사이 종료·재시작이 있었으면 옛 반의 응답은 버린다
-  // 오류 응답({ok:false,msg})이 JSON으로 오면 fetch는 성공이다 — 모양까지 맞아야 성공으로 친다
+  mealTried = true; ttTried = true;
+  // 오류 응답({ok:false,msg})이 JSON으로 오면 fetch는 성공이다 — 모양까지 맞아야 성공으로 친다(급식은 배열)
+  const mealOk = meal.ok && Array.isArray(meal.data);
   const todayOk = today.ok && Array.isArray(today.data);
   const weekOk = week.ok && !!week.data && typeof week.data === 'object' && !Array.isArray(week.data);
-  if (meal.ok) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음)
+  if (mealOk) lastMeal = meal.data;   // 실패면 직전값 유지(빈값으로 덮지 않음) — 한 번도 못 받았으면 null 그대로 «못 받음»
   if (todayOk) lastToday = today.data;
   if (weekOk) lastWeek = week.data;
   if (alive()) {
@@ -209,7 +245,7 @@ async function refreshMeal() {
       weekTimetable: lastWeek
     });
   }
-  if (!meal.ok || !todayOk || !weekOk) {
+  if (!mealOk || !todayOk || !weekOk) {
     if (mealRetryTimer) clearTimeout(mealRetryTimer);
     mealRetryTimer = setTimeout(refreshMeal, MEAL_RETRY_MS);
   }
@@ -239,6 +275,28 @@ function confirmWithRetry(webAppUrl, row, grade, classNum, attempt) {
   });
 }
 
+// 실패가 이어질 때 다음 요청까지 기다릴 시간 — 3초 기준 1번 6초, 2번 12초, 3번부터 15초(호환판 app.js pollDelayMs와 같다)
+function pollDelayMs(baseMs, fails) {
+  if (!(fails > 0)) return baseMs;
+  let d = baseMs;
+  for (let i = 0; i < fails && d < POLL_MAX_MS; i++) d *= 2;
+  return Math.min(d, POLL_MAX_MS);
+}
+// 이미 알린 호출 기억의 열쇠 — «주소|학년|반|행». 주소는 저장할 때 다듬는 모양(role·k·#해시를 뗀 것)으로 맞추고,
+// 행은 글자로 맞춘다(서버가 5와 "5"를 섞어 보내도 같은 행).
+// 새 시트 사본(다른 주소)·다른 반의 같은 행 번호는 열쇠가 달라 따로 센다 — 그래서 설정을 바꿀 때 기억을 통째로 비우지 않는다.
+// (통째로 비우면 반을 A→B→A로 되돌리거나 같은 주소를 다시 넣었을 때 확인 안 된 호출이 같은 날 다시 울렸다)
+function alertKey(webAppUrl, grade, classNum, row) {
+  return api.cleanWebAppUrl(webAppUrl) + '|' + grade + '|' + classNum + '|' + String(row);
+}
+// 이미 알린 호출인지 — 24시간이 지난 기록은 알린 적 없는 것으로 본다
+function wasAlerted(key, now) {
+  const at = alertedAt.get(key);
+  return at !== undefined && now - at <= ALERTED_TTL_MS;
+}
+function markAlerted(key, now) { alertedAt.set(key, now); }
+function pruneAlerted(now) { alertedAt.forEach((at, key) => { if (now - at > ALERTED_TTL_MS) alertedAt.delete(key); }); }
+
 async function tick() {
   if (quitting) return;
   const s = cfg();
@@ -246,30 +304,47 @@ async function tick() {
   const gen = pollGen;
   const { grade, classNum } = classOf(s);
 
-  // 현재 표시 중인 호출의 카운트다운이 끝났으면 확인 처리 후 다음으로 넘어간다
-  let dismissed = false;
+  // 현재 표시 중인 호출의 카운트다운이 끝났으면 확인은 곧바로 보내고, 화면 전환은 다음 응답에서 한다
   if (current && Date.now() >= current.deadlineAt) {
     confirmWithRetry(s.webAppUrl, current.row, grade, classNum);   // 기다리지 않는다(재시도는 뒤에서 따로)
     current = null;
-    dismissed = true;
+    pendingStandby = true;
   }
 
-  const res = await api.getCalls(s.webAppUrl, grade, classNum);
+  // 시계가 뒤로 가면(시각 자동 맞춤 등) 물러날 시각이 몇 시간 뒤로 밀려 호출을 안 묻게 된다 — 상한(15초)보다 먼 예약은 틀린 값으로 보고 지운다
+  if (pollNextAt && pollNextAt - Date.now() > POLL_MAX_MS + 1000) pollNextAt = 0;
+  // 앞 요청이 아직이면 겹쳐 보내지 않는다 — 예전엔 느린 서버(7.5·12초)에서 3초마다 쌓여 한 대가 동시에 3개씩 잡았다.
+  // 실패가 이어져 물러난 중이면 이번 차례는 쉰다(0.5초는 타이머 오차). 3초 박자(setInterval)는 그대로다.
+  if (pollBusyGen === gen || (pollNextAt && Date.now() + 500 < pollNextAt)) return;
+  pollBusyGen = gen;
+  let res;
+  try { res = await api.getCalls(s.webAppUrl, grade, classNum); }
+  catch (e) { res = { ok: false, error: (e && e.message) || String(e) }; }
+  finally { if (pollBusyGen === gen) pollBusyGen = -1; }
   if (quitting || gen !== pollGen) return;   // 기다리는 사이 종료·재시작이 있었으면 옛 반의 목록은 버린다
-  if (!res.ok || !Array.isArray(res.data)) {
-    // 네트워크 오류 — 다음 폴링에서 재시도. 단 방금 카운트다운이 끝났으면 «0초» 알림에 멈춰 있지 않게 대기화면으로.
-    if (dismissed && alive()) win.webContents.send('yc:standby');
+
+  // HTTP 오류·예외·목록(배열)이 아닌 답은 실패로 센다. 물러날 시각은 응답이 «끝난» 때부터 —
+  // 보낸 때부터 재면 8초 시간 초과 뒤 곧바로 다시 보내 물러나기가 헛돈다.
+  if (!res || !res.ok || !Array.isArray(res.data)) {
+    pollFails++;
+    pollNextAt = Date.now() + pollDelayMs(POLL_MS, pollFails);
+    // 카운트다운이 끝났는데 목록을 못 받았으면 «0초» 알림에 멈춰 있지 않게 대기화면으로
+    if (pendingStandby && !current) { pendingStandby = false; if (alive()) win.webContents.send('yc:standby'); }
     return;
   }
+  pollFails = 0; pollNextAt = 0; pendingStandby = false;   // 성공하면 곧바로 3초 박자로
 
   const calls = res.data;
+  const now = Date.now();
+  pruneAlerted(now);
+  const keyOf = c => alertKey(s.webAppUrl, grade, classNum, c.row);   // 이 주소·이 반의 그 행
   // 아직 한 번도 띄우지 않은 호출만 «대기»로 센다 — 확인이 안 돼 서버에 남은 지난 호출까지 세면 «+ 대기 1건»이 거짓으로 뜬다
-  const waiting = () => calls.filter(c => c && !alertedRows.has(c.row)).length;
+  const waiting = () => calls.filter(c => c && !wasAlerted(keyOf(c), now)).length;
 
   if (!current) {
-    const fresh = calls.find(c => c && !alertedRows.has(c.row));
+    const fresh = calls.find(c => c && !wasAlerted(keyOf(c), now));
     if (fresh) {
-      alertedRows.add(fresh.row);
+      markAlerted(keyOf(fresh), now);
       current = Object.assign({}, fresh, { deadlineAt: Date.now() + autoDismissSec * 1000, totalSec: autoDismissSec });
       if (alive()) win.webContents.send('yc:alert', { call: current, queueCount: waiting() });
 
@@ -325,11 +400,15 @@ function registerIpc() {
   // 렌더러는 DOMContentLoaded 뒤에야 onBoard 리스너를 단다 — 그 전에 폴링이 먼저 끝나면
   // 첫 데이터가 통째로 유실돼 급식은 30분, 공지는 3분 동안 "불러오는 중..."에 머물렀다.
   // 렌더러가 준비되면 이걸 한 번 당겨가 즉시 그린다(서버를 다시 부르지 않는다).
+  // …Tried는 «물어서 답이 돌아왔는지» — 렌더러가 null을 «아직 묻는 중»(그대로 둠)과 «못 받음»(불러오지 못했어요)으로 가른다.
   ipcMain.handle('yc:get-snapshot', () => ({
     board: lastBoard,
     meal: lastMeal,
     todayTimetable: lastToday,
-    weekTimetable: lastWeek
+    weekTimetable: lastWeek,
+    boardTried,
+    mealTried,
+    ttTried
   }));
   ipcMain.handle('yc:save-settings', (e, patch) => {
     patch = Object.assign({}, patch);
@@ -352,7 +431,12 @@ function registerIpc() {
       // 옛 반의 표시 중 호출·시간표·공지는 새 반 화면에 섞이지 않게 비운다(설정 화면은 저장 뒤 새로고침한다)
       current = null;
       lastBoard = null; lastToday = null; lastWeek = null;
-      if (urlChanged) lastMeal = [];
+      boardTried = false; ttTried = false;   // 공지·시간표는 반마다 다르다 — 새 반 것을 묻는 동안은 «불러오는 중...»
+      // 급식은 학교(주소) 단위 — 주소가 바뀔 때만 비운다(옛 학교 급식이 새 학교 화면에 남지 않게).
+      // 학년·반만 바꿨는데 «물어봤음»까지 끄면 새로고침 뒤 급식이 «불러오는 중...»에 남았다.
+      if (urlChanged) { lastMeal = null; mealTried = false; }
+      // 이미 알린 호출 기억은 비우지 않는다 — 열쇠가 «주소|학년|반|행»(alertKey)이라 새 시트·새 반의 같은 행 번호는 따로 센다.
+      // 통째로 비우면 반을 A→B→A로 되돌리거나 같은 주소를 다시 넣었을 때 확인 안 된 호출이 같은 날 다시 울렸다.
       startPolling();
     }
     return next;

@@ -160,16 +160,27 @@ body { font-family: 'Noto Sans KR', 'Malgun Gothic', sans-serif; color: var(--te
 #weekWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; padding-bottom: 250px; }
 /* --ws: 표가 우측 하단 소리 설정 패널에 가릴 때 JS(fitWeekBox)가 낮추는 배율.
    저해상도에서 마지막 교시 행이 패널 밑으로 들어가던 문제. */
-table.week { --ws: 1; width: 100%; border-collapse: collapse; font-size: calc(clamp(12px,0.8vw,20px) * var(--ws)); flex: 1; }
+/* 2026-09-16 웹 칠판과 같은 고침(GAS index.html) — table-layout을 안 정하면(auto) 요일 칸 너비가
+   그 칸의 가장 긴 과목명에 맞춰 브라우저 마음대로 정해져, 짧은 과목만 있는 요일(주로 금)이
+   극단적으로 좁아지고 2글자 과목마저 한 글자씩 세로로 쌓였다. fixed로 고정하면 요일 5칸이 항상
+   똑같이 나뉜다 — 아래 th.pnum/td.pnum의 width가 fixed 폭 계산 기준(첫 행 기준)이다. */
+table.week { --ws: 1; width: 100%; border-collapse: collapse; table-layout: fixed; font-size: calc(clamp(12px,0.8vw,20px) * var(--ws)); flex: 1; }
 table.week th { font-weight: 700; color: var(--text2); padding: calc(7px * var(--ws)) 4px; font-size: calc(clamp(11px,0.72vw,18px) * var(--ws)); }
 table.week th.today { color: var(--blue-d); }
 table.week td { text-align: center; padding: calc(6px * var(--ws)) 4px; border-top: 1px solid var(--border); font-weight: 500; }
+/* 과목명이 칸보다 길면 최대 2줄까지만 보여준다(그 밑은 잘라서 숨김, 말줄임표 없음 —
+   <td>에 -webkit-line-clamp를 직접 쓰면 표 셀 성질이 깨져 행 높이 계산이 크게 어긋났다).
+   keep-all로 자연스러운 자리(가운뎃점 뒤 등)에서 먼저 끊고, 안 끊기는 긴 낱말만 overflow-wrap이 끊는다. */
+table.week td:not(.pnum), table.week th:not(.pnum) {
+  overflow: hidden; line-height: 1.2; max-height: 2.4em;
+  word-break: keep-all; overflow-wrap: break-word;
+}
 table.week td.today-col { background: #eaf5ff; font-weight: 700; border-radius: 8px; }
 /* 교체 칸은 오늘 열 색보다 뒤에 둔다 — 오늘이면서 교체인 칸도 교체 색으로 보이게 */
 table.week td.chg { background: #fff1c9; color: var(--yellow-ink); font-weight: 900; border-radius: 8px; box-shadow: inset 0 0 0 2px var(--yellow-d); }
 .week-legend { display: flex; align-items: center; gap: 6px; font-size: clamp(10px,0.62vw,15px); font-weight: 700; color: var(--yellow-ink); margin-bottom: 4px; flex-shrink: 0; }
 .week-legend .sw { width: 1.1em; height: 1.1em; border-radius: 4px; background: #fff1c9; box-shadow: inset 0 0 0 2px var(--yellow-d); }
-table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; }
+table.week th.pnum, table.week td.pnum { color: var(--text2); font-size: calc(clamp(10px,0.67vw,16px) * var(--ws)); width: 32px; max-height: none; }
 .week-empty { font-size: clamp(11px,0.7vw,17px); color: var(--text2); }
 
 .s-settings { position: absolute; bottom: 16px; right: 16px; opacity: .65; transition: opacity .3s; }

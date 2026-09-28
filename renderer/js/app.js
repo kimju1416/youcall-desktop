@@ -676,7 +676,8 @@ window.addEventListener('DOMContentLoaded', async function () {
           renderAgenda(snap.board.agenda);
           applyPeriodConfig(snap.board.periodConfig);
         }
-        if (snap.meal && snap.meal.length) renderMeal(snap.meal);
+        // 급식은 받았으면(빈 목록 포함) 그린다 — 예전엔 1개 이상일 때만 그려, 급식 없는 날 켜면 최대 30분 «불러오는 중...»에 멈췄다
+        if (Array.isArray(snap.meal)) renderMeal(snap.meal);
         // 시간표는 main이 한 번이라도 받았을 때만(null이 아니면) 그린다 — 받았는데 빈 것도 «오늘은 수업이 없어요»로 그려야 맞다
         if (Array.isArray(snap.todayTimetable)) renderPeriodRow(snap.todayTimetable);
         if (snap.weekTimetable && typeof snap.weekTimetable === 'object') renderWeek(snap.weekTimetable);

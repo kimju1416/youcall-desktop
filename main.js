@@ -31,7 +31,8 @@ const CONFIRM_RETRY_MS = [2000, 5000, 10000];
 const CLASS_NO_MSG = '학년·반은 숫자만 입력해 주세요 (예: 3, 2)';
 
 // ── 급식/시간표 직전 성공값(last-good) — NEIS 일시 실패 시 빈값으로 덮지 않고 이 값을 유지한다 ──
-let lastMeal = [];
+// null = 아직 한 번도 못 받음, [] = 받았는데 급식 없는 날 — 스냅샷이 둘을 가려야 급식 없는 날 «불러오는 중...»에 멈추지 않는다
+let lastMeal = null;
 // 시간표는 null(한 번도 못 받음)과 []·{}(받았는데 비었음)를 가른다 — 못 받은 걸 «오늘은 수업이 없어요»로 그리지 않게
 let lastToday = null;
 let lastWeek = null;
@@ -352,7 +353,7 @@ function registerIpc() {
       // 옛 반의 표시 중 호출·시간표·공지는 새 반 화면에 섞이지 않게 비운다(설정 화면은 저장 뒤 새로고침한다)
       current = null;
       lastBoard = null; lastToday = null; lastWeek = null;
-      if (urlChanged) lastMeal = [];
+      if (urlChanged) lastMeal = null;
       startPolling();
     }
     return next;
